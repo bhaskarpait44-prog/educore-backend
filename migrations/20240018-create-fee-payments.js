@@ -12,48 +12,48 @@ module.exports = {
   async up(queryInterface, Sequelize) {
     await queryInterface.createTable('fee_payments', {
       id: {
-        type          : Sequelize.INTEGER,
-        autoIncrement : true,
-        primaryKey    : true,
-        allowNull     : false,
+        type: Sequelize.INTEGER,
+        autoIncrement: true,
+        primaryKey: true,
+        allowNull: false,
       },
       invoice_id: {
-        type       : Sequelize.INTEGER,
-        allowNull  : false,
-        references : { model: 'fee_invoices', key: 'id' },
-        onUpdate   : 'CASCADE',
-        onDelete   : 'RESTRICT',
-        comment    : 'Which invoice this payment is applied to',
+        type: Sequelize.INTEGER,
+        allowNull: false,
+        references: { model: 'fee_invoices', key: 'id' },
+        onUpdate: 'CASCADE',
+        onDelete: 'RESTRICT',
+        comment: 'Which invoice this payment is applied to',
       },
       amount: {
-        type      : Sequelize.DECIMAL(10, 2),
-        allowNull : false,
-        comment   : 'Amount paid in this transaction',
+        type: Sequelize.DECIMAL(10, 2),
+        allowNull: false,
+        comment: 'Amount paid in this transaction',
       },
       payment_date: {
-        type      : Sequelize.DATEONLY,
-        allowNull : false,
-        comment   : 'Date payment was received (may differ from created_at)',
+        type: Sequelize.DATEONLY,
+        allowNull: false,
+        comment: 'Date payment was received (may differ from created_at)',
       },
       payment_mode: {
-        type      : Sequelize.ENUM('cash', 'online', 'cheque', 'dd'),
-        allowNull : false,
-        comment   : 'cash=counter, online=UPI/NEFT, cheque=bank cheque, dd=demand draft',
+        type: Sequelize.ENUM('cash', 'online', 'cheque', 'dd'),
+        allowNull: false,
+        comment: 'cash=counter, online=UPI/NEFT, cheque=bank cheque, dd=demand draft',
       },
       transaction_ref: {
-        type      : Sequelize.STRING(200),
-        allowNull : true,
-        comment   : 'UPI transaction ID, cheque number, DD number etc.',
+        type: Sequelize.STRING(200),
+        allowNull: true,
+        comment: 'UPI transaction ID, cheque number, DD number etc.',
       },
       received_by: {
-        type      : Sequelize.INTEGER,
-        allowNull : true,
-        comment   : 'FK to users.id — accountant or admin who recorded the payment',
+        type: Sequelize.INTEGER,
+        allowNull: true,
+        comment: 'FK to users.id — accountant or admin who recorded the payment',
       },
       created_at: {
-        type         : Sequelize.DATE,
-        allowNull    : false,
-        defaultValue : Sequelize.literal('CURRENT_TIMESTAMP'),
+        type: Sequelize.DATE,
+        allowNull: false,
+        defaultValue: Sequelize.literal('CURRENT_TIMESTAMP'),
       },
     });
 
@@ -66,10 +66,22 @@ module.exports = {
     });
 
     // transaction_ref should be unique when provided
+    // await queryInterface.addIndex('fee_payments', ['transaction_ref'], {
+    //   name   : 'idx_fee_payments_transaction_ref',
+    //   unique : true,
+    //   where  : 'transaction_ref IS NOT NULL',   // Partial index — NULLs not compared
+    // });
+
+    const { Op } = Sequelize;
+
     await queryInterface.addIndex('fee_payments', ['transaction_ref'], {
-      name   : 'idx_fee_payments_transaction_ref',
-      unique : true,
-      where  : 'transaction_ref IS NOT NULL',   // Partial index — NULLs not compared
+      name: 'idx_fee_payments_transaction_ref',
+      unique: true,
+      where: {
+        transaction_ref: {
+          [Op.ne]: null,
+        },
+      },
     });
 
     // Amount must be positive

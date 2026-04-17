@@ -81,11 +81,23 @@ module.exports = {
     });
 
     // Code unique within a class when provided
-    await queryInterface.addIndex('subjects', ['class_id', 'code'], {
-      name   : 'idx_subjects_class_code',
-      unique : true,
-      where  : 'code IS NOT NULL',
-    });
+    // await queryInterface.addIndex('subjects', ['class_id', 'code'], {
+    //   name   : 'idx_subjects_class_code',
+    //   unique : true,
+    //   where  : 'code IS NOT NULL',
+    // });
+
+    const { Op } = Sequelize;
+
+await queryInterface.addIndex('subjects', ['class_id', 'code'], {
+  name   : 'idx_subjects_class_code',
+  unique : true,
+  where  : {
+    code: {
+      [Op.ne]: null,
+    },
+  },
+});
 
     await queryInterface.addIndex('subjects', ['class_id', 'is_core'], {
       name: 'idx_subjects_class_core',

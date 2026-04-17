@@ -1,0 +1,30 @@
+// routes/results.js
+'use strict';
+
+const router   = require('express').Router();
+const { body, param } = require('express-validator');
+const validate = require('../middlewares/validate');
+const { requireAdmin, requireAdminOrTeacher } = require('../middlewares/auth');
+const ctrl     = require('../controllers/resultController');
+
+router.post('/enter',       requireAdminOrTeacher, [
+  body('exam_id').isInt(),
+  body('enrollment_id').isInt(),
+  body('results').isArray({ min: 1 }),
+  body('results.*.subject_id').isInt(),
+], validate, ctrl.enterMarks);
+
+router.get('/:enrollment_id',                      ctrl.getResults);
+
+router.post('/calculate',   requireAdmin, [
+  body('enrollment_id').isInt(),
+  body('session_id').isInt(),
+], validate, ctrl.calculate);
+
+router.patch('/override',   requireAdmin, [
+  body('enrollment_id').isInt(),
+  body('new_result').isIn(['pass', 'fail', 'compartment', 'detained']),
+  body('reason').isLength({ min: 10 }),
+], validate, ctrl.override);
+
+module.exports = router;
