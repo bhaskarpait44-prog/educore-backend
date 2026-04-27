@@ -1,55 +1,45 @@
 'use strict';
 
 require('dotenv').config();
+const { Sequelize } = require('sequelize');
 
-const common = {
-  dialect: 'postgres',
-  define: {
-    underscored: true,
-    freezeTableName: true,
-    timestamps: true,
-  },
-};
+const isProduction = process.env.NODE_ENV === 'production';
 
-module.exports = {
-  development: {
-    ...common,
-    username: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT, 10) || 5432,
-  },
+let sequelize;
 
-  test: {
-    ...common,
-    username: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME + '_test',
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT, 10) || 5432,
-  },
-
-  production: process.env.DATABASE_URL
-    ? {
-        ...common,
-        use_env_variable: 'DATABASE_URL',
-        logging: false,
-        dialectOptions: {
-          ssl: {
-            require: true,
-            rejectUnauthorized: false,
-          },
-        },
-      }
-    : {
-        // fallback (rare case)
-        ...common,
-        username: process.env.DB_USER,
-        password: process.env.DB_PASSWORD,
-        database: process.env.DB_NAME,
-        host: process.env.DB_HOST,
-        port: parseInt(process.env.DB_PORT, 10) || 5432,
-        logging: false,
+if (isProduction && process.env.DATABASE_URL) {
+  // ☁️ Railway / Production
+  sequelize = new Sequelize(process.env.DATABASE_URL, {
+    dialect: 'postgres',
+    logging: false,
+    dialectOptions: {
+      ssl: {
+        require: true,
+        rejectUnauthorized: false,
       },
-};
+    },
+  });
+
+  console.log("✅ Using DATABASE_URL (Production)");
+} else {
+  // 💻 Local Development
+  if (!process.env.DB_HOST) {
+    throw new Error("❌ DB_HOST missing (local setup)");
+  }
+
+  sequelize = new Sequelize(
+    process.env.DB_NAME,
+    process.env.DB_USER,
+    process.env.DB_PASSWORD,
+    {
+      host: process.env.DB_HOST,
+      port: process.env.DB_PORT || 5432,
+      dialect: process.env.DB_DIALECT || 'postgres',
+      logging: false,
+    }
+  );
+
+  console.log("✅ Using DB_HOST config (Local)");
+}
+
+module.exports = sequelize;
