@@ -1,11 +1,5 @@
+// migrations/YYYYMMDD-create-sections.js
 'use strict';
-
-/**
- * Migration: create_sections
- * Divisions within a class (A, B, C etc.)
- * A section belongs to exactly one class.
- * capacity is advisory — enforced in app layer, not DB constraint.
- */
 
 module.exports = {
   async up(queryInterface, Sequelize) {
@@ -22,23 +16,27 @@ module.exports = {
         references : { model: 'classes', key: 'id' },
         onUpdate   : 'CASCADE',
         onDelete   : 'RESTRICT',
-        comment    : 'Parent class — section cannot exist without a class',
       },
       name: {
         type      : Sequelize.STRING(10),
         allowNull : false,
-        comment   : 'Section label e.g. "A", "B", "Rose", "Blue"',
+        comment   : 'e.g. A, B, C, Rose, Blue',
       },
       capacity: {
         type         : Sequelize.INTEGER,
         allowNull    : false,
         defaultValue : 40,
-        comment      : 'Maximum number of students. Soft limit — enforced in app layer.',
+        comment      : 'Maximum students allowed — enforced on enrollment',
       },
       is_active: {
         type         : Sequelize.BOOLEAN,
         allowNull    : false,
         defaultValue : true,
+      },
+      is_deleted: {
+        type         : Sequelize.BOOLEAN,
+        allowNull    : false,
+        defaultValue : false,
       },
       created_at: {
         type         : Sequelize.DATE,
@@ -52,14 +50,29 @@ module.exports = {
       },
     });
 
-    // Section name must be unique within a class (can't have two "A" sections in Grade 1)
+    // Section name unique within a class
     await queryInterface.addIndex('sections', ['class_id', 'name'], {
       name   : 'idx_sections_class_name',
       unique : true,
+      where  : { is_deleted: false },
     });
+
+    await queryInterface.addIndex('sections', ['class_id', 'is_deleted'], {
+      name: 'idx_sections_class',
+    });
+
+    // Capacity must be positive
+    await queryInterface.sequelize.query(`
+      ALTER TABLE sections
+      ADD CONSTRAINT chk_sections_capacity_positive
+      CHECK (capacity >= 1);
+    `);
   },
 
   async down(queryInterface) {
+    await queryInterface.sequelize.query(
+      `ALTER TABLE sections DROP CONSTRAINT IF EXISTS chk_sections_capacity_positive;`
+    );
     await queryInterface.dropTable('sections');
   },
 };

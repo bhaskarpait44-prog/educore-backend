@@ -25,6 +25,19 @@ const sequelize            = require('../config/database');
 const { getAttendancePercent } = require('./attendanceCalculator');
 const auditLogger          = require('./auditLogger');
 
+const RESULT_RULES = {
+  minAttendancePercent: Number(process.env.RESULT_MIN_ATTENDANCE_PERCENT || 75),
+  maxCoreFailuresForCompartment: Number(process.env.RESULT_MAX_CORE_FAILURES_FOR_COMPARTMENT || 2),
+  grades: [
+    { min: Number(process.env.GRADE_A_PLUS_MIN || 90), grade: 'A+' },
+    { min: Number(process.env.GRADE_A_MIN || 80), grade: 'A' },
+    { min: Number(process.env.GRADE_B_PLUS_MIN || 70), grade: 'B+' },
+    { min: Number(process.env.GRADE_B_MIN || 60), grade: 'B' },
+    { min: Number(process.env.GRADE_C_MIN || 50), grade: 'C' },
+    { min: Number(process.env.GRADE_D_MIN || 40), grade: 'D' },
+  ],
+};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SHARED: Grade calculator
 // ─────────────────────────────────────────────────────────────────────────────
@@ -34,12 +47,9 @@ const auditLogger          = require('./auditLogger');
  * Applied consistently to both subject-level and session-level percentages.
  */
 function percentageToGrade(pct) {
-  if (pct >= 90) return 'A+';
-  if (pct >= 80) return 'A';
-  if (pct >= 70) return 'B+';
-  if (pct >= 60) return 'B';
-  if (pct >= 50) return 'C';
-  if (pct >= 40) return 'D';
+  for (const band of RESULT_RULES.grades) {
+    if (pct >= band.min) return band.grade;
+  }
   return 'F';
 }
 
@@ -89,17 +99,20 @@ async function calculateResult(enrollmentId, sessionId) {
       er.is_pass,
       sub.id            AS subject_id,
       sub.name          AS subject_name,
-      sub.total_marks   AS subject_total,
-      sub.passing_marks AS subject_passing,
+      es.combined_total_marks   AS subject_total,
+      es.combined_passing_marks AS subject_passing,
       sub.is_core,
       e.exam_type,
-      e.status          AS exam_status
+      e.status          AS exam_status,
+      es.review_status
     FROM exam_results  er
     JOIN exams         e   ON e.id   = er.exam_id
+    JOIN exam_subjects es  ON es.exam_id = er.exam_id
+                           AND es.subject_id = er.subject_id
     JOIN subjects      sub ON sub.id = er.subject_id
     WHERE er.enrollment_id = :enrollmentId
       AND e.session_id     = :sessionId
-      AND e.status         = 'completed'
+      AND es.review_status = 'approved'
       AND e.exam_type     != 'compartment';
   `, { replacements: { enrollmentId, sessionId } });
 
@@ -112,7 +125,7 @@ async function calculateResult(enrollmentId, sessionId) {
   // ── Step 2: Attendance check ─────────────────────────────────────────────
   const attendanceStats = await getAttendancePercent(enrollmentId);
   const attendancePct   = attendanceStats.percentage;
-  const failedAttendance = attendancePct < 75;
+  const failedAttendance = attendancePct < RESULT_RULES.minAttendancePercent;
 
   // ── Step 3: Aggregate marks ──────────────────────────────────────────────
   let totalMarks    = 0;
@@ -176,7 +189,7 @@ async function calculateResult(enrollmentId, sessionId) {
   } else if (failedCoreCount === 0) {
     result      = 'pass';
     isPromoted  = true;
-  } else if (failedCoreCount <= 2) {
+  } else if (failedCoreCount <= RESULT_RULES.maxCoreFailuresForCompartment) {
     result             = 'compartment';
     compartmentSubjects = failedCoreSubjects.map(s => s.subject_id);
     isPromoted         = false;  // Pending compartment exam
@@ -312,7 +325,7 @@ async function processCompartment(enrollmentId, subjectId, newMarks, enteredBy) 
       WHERE session_id = :sessionId
         AND class_id   = :classId
         AND exam_type  = 'compartment'
-        AND status     = 'completed'
+        AND status IN ('completed', 'published')
       LIMIT 1;
     `, {
       replacements: { sessionId: enrollment.session_id, classId: enrollment.class_id },
@@ -513,4 +526,5 @@ module.exports = {
   overrideResult,
   percentageToGrade,
   calcSubjectResult,
+  RESULT_RULES,
 };

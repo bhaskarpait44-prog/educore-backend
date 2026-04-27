@@ -1,0 +1,75 @@
+'use strict';
+
+module.exports = {
+  async up(queryInterface, Sequelize) {
+    await queryInterface.createTable('profile_correction_requests', {
+      id: {
+        type: Sequelize.INTEGER,
+        autoIncrement: true,
+        primaryKey: true,
+        allowNull: false,
+      },
+      user_id: {
+        type: Sequelize.INTEGER,
+        allowNull: false,
+        references: { model: 'users', key: 'id' },
+        onUpdate: 'CASCADE',
+        onDelete: 'RESTRICT',
+      },
+      field_name: {
+        type: Sequelize.STRING(100),
+        allowNull: false,
+      },
+      current_value: {
+        type: Sequelize.TEXT,
+        allowNull: true,
+      },
+      requested_value: {
+        type: Sequelize.TEXT,
+        allowNull: false,
+      },
+      reason: {
+        type: Sequelize.TEXT,
+        allowNull: false,
+      },
+      status: {
+        type: Sequelize.ENUM('pending', 'approved', 'rejected'),
+        allowNull: false,
+        defaultValue: 'pending',
+      },
+      reviewed_by: {
+        type: Sequelize.INTEGER,
+        allowNull: true,
+        references: { model: 'users', key: 'id' },
+        onUpdate: 'CASCADE',
+        onDelete: 'SET NULL',
+      },
+      review_note: {
+        type: Sequelize.TEXT,
+        allowNull: true,
+      },
+      reviewed_at: {
+        type: Sequelize.DATE,
+        allowNull: true,
+      },
+      created_at: {
+        type: Sequelize.DATE,
+        allowNull: false,
+        defaultValue: Sequelize.literal('CURRENT_TIMESTAMP'),
+      },
+      updated_at: {
+        type: Sequelize.DATE,
+        allowNull: false,
+        defaultValue: Sequelize.literal('CURRENT_TIMESTAMP'),
+      },
+    });
+
+    await queryInterface.addIndex('profile_correction_requests', ['user_id', 'status', 'created_at'], {
+      name: 'idx_profile_correction_requests_user_status',
+    });
+  },
+
+  async down(queryInterface) {
+    await queryInterface.dropTable('profile_correction_requests');
+  },
+};

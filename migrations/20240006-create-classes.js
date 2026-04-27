@@ -1,11 +1,5 @@
+// migrations/YYYYMMDD-create-classes.js
 'use strict';
-
-/**
- * Migration: create_classes
- * Defines grade levels within a school.
- * order_number drives promotion sequence (Grade 1=1, Grade 2=2, etc.)
- * min_age/max_age are advisory — used for admission validation warnings.
- */
 
 module.exports = {
   async up(queryInterface, Sequelize) {
@@ -22,33 +16,59 @@ module.exports = {
         references : { model: 'schools', key: 'id' },
         onUpdate   : 'CASCADE',
         onDelete   : 'RESTRICT',
-        comment    : 'Tenant key — classes belong to one school',
       },
       name: {
-        type      : Sequelize.STRING(50),
+        type      : Sequelize.STRING(100),
         allowNull : false,
-        comment   : 'Display name e.g. "Grade 1", "Class X", "LKG"',
+        comment   : 'e.g. Grade 6, Grade 7',
+      },
+      display_name: {
+        type      : Sequelize.STRING(100),
+        allowNull : true,
+        comment   : 'e.g. Class 6, Standard 6 — shown on reports',
       },
       order_number: {
         type      : Sequelize.INTEGER,
         allowNull : false,
-        comment   : 'Defines promotion sequence. Grade 1=1, Grade 2=2. Lower = younger.',
+        comment   : 'Promotion sequence order — Grade 1 = 1, Grade 2 = 2',
       },
       min_age: {
         type      : Sequelize.INTEGER,
         allowNull : true,
-        comment   : 'Minimum recommended age in years for admission to this class',
+        comment   : 'Minimum recommended age in years',
       },
       max_age: {
         type      : Sequelize.INTEGER,
         allowNull : true,
-        comment   : 'Maximum recommended age in years for this class',
+        comment   : 'Maximum recommended age in years',
+      },
+      description: {
+        type      : Sequelize.TEXT,
+        allowNull : true,
       },
       is_active: {
         type         : Sequelize.BOOLEAN,
         allowNull    : false,
         defaultValue : true,
-        comment      : 'Inactive classes cannot receive new enrollments',
+      },
+      is_deleted: {
+        type         : Sequelize.BOOLEAN,
+        allowNull    : false,
+        defaultValue : false,
+      },
+      created_by: {
+        type       : Sequelize.INTEGER,
+        allowNull  : true,
+        references : { model: 'users', key: 'id' },
+        onUpdate   : 'CASCADE',
+        onDelete   : 'SET NULL',
+      },
+      updated_by: {
+        type       : Sequelize.INTEGER,
+        allowNull  : true,
+        references : { model: 'users', key: 'id' },
+        onUpdate   : 'CASCADE',
+        onDelete   : 'SET NULL',
       },
       created_at: {
         type         : Sequelize.DATE,
@@ -62,20 +82,30 @@ module.exports = {
       },
     });
 
-    // Class name must be unique within a school
-    await queryInterface.addIndex('classes', ['school_id', 'name'], {
-      name   : 'idx_classes_school_name',
-      unique : true,
-    });
-
-    // Order must be unique within a school (no two classes at same position)
+    // Unique order per school (no two classes at same position)
     await queryInterface.addIndex('classes', ['school_id', 'order_number'], {
       name   : 'idx_classes_school_order',
       unique : true,
+      where  : { is_deleted: false },
     });
+
+    // Fast filter queries
+    await queryInterface.addIndex('classes', ['school_id', 'is_active', 'is_deleted'], {
+      name: 'idx_classes_school_active',
+    });
+
+    // Age range check
+    await queryInterface.sequelize.query(`
+      ALTER TABLE classes
+      ADD CONSTRAINT chk_classes_age_range
+      CHECK (max_age IS NULL OR min_age IS NULL OR max_age > min_age);
+    `);
   },
 
   async down(queryInterface) {
+    await queryInterface.sequelize.query(
+      `ALTER TABLE classes DROP CONSTRAINT IF EXISTS chk_classes_age_range;`
+    );
     await queryInterface.dropTable('classes');
   },
 };

@@ -16,7 +16,17 @@ module.exports = {
       email:        { type: Sequelize.STRING(150), allowNull: false },
       password_hash:{ type: Sequelize.STRING(255), allowNull: false },
       role: {
-        type: Sequelize.ENUM('admin', 'teacher', 'accountant', 'staff'),
+        type: Sequelize.ENUM(
+          'super_admin',
+          'admin',
+          'teacher',
+          'accountant',
+          'staff',
+          'student',
+          'parent',
+          'librarian',
+          'receptionist'
+        ),
         allowNull: false,
       },
       is_active: { type: Sequelize.BOOLEAN, allowNull: false, defaultValue: true },

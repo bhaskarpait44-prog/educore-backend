@@ -73,8 +73,35 @@ exports.getCurrent = async (req, res, next) => {
       GROUP BY s.id, wd.id;
     `, { replacements: { schoolId: req.user.school_id } });
 
-    if (!session) return res.fail('No active session found.', [], 404);
+    if (!session) return res.ok(null, 'No active session found.');
     res.ok(session, 'Current session retrieved.');
+  } catch (err) { next(err); }
+};
+
+// ── GET /api/sessions/:id ───────────────────────────────────────────────────
+exports.getById = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const [[session]] = await sequelize.query(`
+      SELECT s.id, s.name, s.start_date, s.end_date, s.status, s.is_current,
+             wd.monday, wd.tuesday, wd.wednesday, wd.thursday, wd.friday, wd.saturday, wd.sunday
+      FROM sessions s
+      LEFT JOIN session_working_days wd ON wd.session_id = s.id
+      WHERE s.id = :id AND s.school_id = :schoolId
+      LIMIT 1;
+    `, { replacements: { id, schoolId: req.user.school_id } });
+
+    if (!session) return res.fail('Session not found.', [], 404);
+
+    const [holidays] = await sequelize.query(`
+      SELECT id, session_id, holiday_date, name, type
+      FROM session_holidays
+      WHERE session_id = :id
+      ORDER BY holiday_date ASC, id ASC;
+    `, { replacements: { id } });
+
+    res.ok({ ...session, holidays }, 'Session retrieved.');
   } catch (err) { next(err); }
 };
 
@@ -133,5 +160,22 @@ exports.addHoliday = async (req, res, next) => {
       ? `Holiday added. ${retroResult.affectedCount} attendance record(s) updated retroactively.`
       : 'Holiday added.'
     , 201);
+  } catch (err) { next(err); }
+};
+
+// ── GET /api/sessions/:id/holidays ──────────────────────────────────────────
+exports.getHolidays = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const [holidays] = await sequelize.query(`
+      SELECT h.id, h.session_id, h.holiday_date, h.name, h.type
+      FROM session_holidays h
+      JOIN sessions s ON s.id = h.session_id
+      WHERE h.session_id = :id AND s.school_id = :schoolId
+      ORDER BY h.holiday_date ASC, h.id ASC;
+    `, { replacements: { id, schoolId: req.user.school_id } });
+
+    res.ok(holidays, `${holidays.length} holiday(s) found.`);
   } catch (err) { next(err); }
 };

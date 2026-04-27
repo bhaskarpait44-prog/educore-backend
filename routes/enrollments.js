@@ -15,6 +15,8 @@ router.post('/',          requireAdmin, [
   body('joined_date').isDate(),
 ], validate, ctrl.enroll);
 
+router.get('/promotion/candidates', requireAdmin, ctrl.promotionCandidates);
+router.post('/promotion/process', requireAdmin, ctrl.processPromotions);
 router.get('/:id',                     [param('id').isInt()], validate, ctrl.getById);
 router.post('/promote', requireAdmin,  ctrl.promote);
 router.post('/transfer', requireAdmin, ctrl.transfer);

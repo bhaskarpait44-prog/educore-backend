@@ -1,33 +1,95 @@
 'use strict';
 
-const router   = require('express').Router();
+const router = require('express').Router();
 const { body } = require('express-validator');
+
 const validate = require('../middlewares/validate');
-const { requireAdmin, requireAdminOrAccountant } = require('../middlewares/auth');
-const ctrl     = require('../controllers/feeController');
+const ctrl = require('../controllers/feeController');
+const { requirePermission } = require('../middlewares/checkPermission');
 
-router.post('/structure',     requireAdmin, [
-  body('class_id').isInt(),
-  body('name').notEmpty(),
-  body('amount').isDecimal(),
-  body('frequency').isIn(['monthly', 'quarterly', 'annual', 'one_time']),
-  body('due_day').isInt({ min: 1, max: 28 }),
-], validate, ctrl.createStructure);
+// ─────────────────────────────────────────────
+// 📦 Fee Structures
+// ─────────────────────────────────────────────
 
-router.post('/generate',      requireAdmin, [body('session_id').isInt()], validate, ctrl.generate);
-router.get('/:enrollment_id',              ctrl.getStudentFees);
+// Get all fee structures
+router.get('/structures',
+  requirePermission('fees.view'),
+  ctrl.getStructures
+);
 
-router.post('/payment',       requireAdminOrAccountant, [
-  body('invoice_id').isInt(),
-  body('amount').isDecimal({ gt: '0' }),
-  body('payment_date').isDate(),
-  body('payment_mode').isIn(['cash', 'online', 'cheque', 'dd']),
-], validate, ctrl.recordPayment);
+// Create fee structure
+router.post('/structure',
+  requirePermission('fees.edit'),
+  [
+    body('class_id').isInt(),
+    body('name').notEmpty(),
+    body('amount').isDecimal(),
+    body('frequency').isIn(['monthly', 'quarterly', 'annual', 'one_time']),
+    body('due_day').isInt({ min: 1, max: 28 }),
+  ],
+  validate,
+  ctrl.createStructure
+);
 
-router.post('/carry-forward', requireAdmin, [
-  body('student_id').isInt(),
-  body('from_session_id').isInt(),
-  body('to_session_id').isInt(),
-], validate, ctrl.carryForward);
+// Delete fee structure
+router.delete('/structure/:id',
+  requirePermission('fees.edit'),
+  ctrl.deleteStructure
+);
+
+// ─────────────────────────────────────────────
+// 💰 Payments
+// ─────────────────────────────────────────────
+
+// Record payment
+router.post('/payment',
+  requirePermission('fees.collect'),
+  [
+    body('invoice_id').isInt(),
+    body('amount').isDecimal({ gt: '0' }),
+    body('payment_date').isDate(),
+    body('payment_mode').isIn(['cash', 'online', 'cheque', 'dd']),
+  ],
+  validate,
+  ctrl.recordPayment
+);
+
+// Carry forward dues
+router.post('/carry-forward',
+  requirePermission('fees.collect'),
+  [
+    body('student_id').isInt(),
+    body('from_session_id').isInt(),
+    body('to_session_id').isInt(),
+  ],
+  validate,
+  ctrl.carryForward
+);
+
+// ─────────────────────────────────────────────
+// 📊 Reports & Generation
+// ─────────────────────────────────────────────
+
+// Generate fees
+router.post('/generate',
+  requirePermission('fees.generate'),
+  [
+    body('session_id').isInt(),
+  ],
+  validate,
+  ctrl.generate
+);
+
+// Fee reports
+router.get('/report',
+  requirePermission('fees.report'),
+  ctrl.getReport
+);
+
+// Get student fee details
+router.get('/:enrollment_id',
+  requirePermission('fees.view'),
+  ctrl.getStudentFees
+);
 
 module.exports = router;

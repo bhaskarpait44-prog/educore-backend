@@ -12,7 +12,11 @@ const Exam = sequelize.define('Exam', {
   end_date      : { type: DataTypes.DATEONLY, allowNull: false },
   total_marks   : { type: DataTypes.DECIMAL(8, 2), allowNull: false },
   passing_marks : { type: DataTypes.DECIMAL(8, 2), allowNull: false },
-  status        : { type: DataTypes.ENUM('upcoming', 'ongoing', 'completed'), allowNull: false, defaultValue: 'upcoming' },
+  status        : { type: DataTypes.ENUM('upcoming', 'ongoing', 'completed', 'draft', 'published'), allowNull: false, defaultValue: 'draft' },
+  published_at  : { type: DataTypes.DATE, allowNull: true },
+  published_by  : { type: DataTypes.INTEGER, allowNull: true },
+  created_by    : { type: DataTypes.INTEGER, allowNull: true },
+  updated_by    : { type: DataTypes.INTEGER, allowNull: true },
 }, { tableName: 'exams', underscored: true });
 
 module.exports = Exam;
