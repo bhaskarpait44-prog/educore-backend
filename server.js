@@ -21,7 +21,11 @@ async function boot() {
     logger.info(`Starting EduCore API [${NODE_ENV}]...`);
 
     await sequelize.authenticate();
-    logger.info(`Database connected -> ${process.env.DB_DIALECT}://${process.env.DB_HOST}:${process.env.DB_PORT}/${process.env.DB_NAME}`);
+    if (process.env.DATABASE_URL) {
+      logger.info('Database connected using DATABASE_URL');
+    } else {
+      logger.info(`Database connected -> ${process.env.DB_DIALECT}://${process.env.DB_HOST}:${process.env.DB_PORT}/${process.env.DB_NAME}`);
+    }
 
     app.listen(PORT, () => {
       logger.info(`Server running on port ${PORT}`);
@@ -29,6 +33,7 @@ async function boot() {
     });
   } catch (error) {
     logger.error('Failed to connect to database:', error.message);
+    if (error.stack) logger.error(error.stack);
     logger.error('Check your .env DB_* variables and ensure the database server is running.');
     process.exit(1);
   }

@@ -2,65 +2,66 @@
 
 /**
  * config/database.js
- * Sequelize connection instance — single source of truth for DB config.
+ * Sequelize connection instance - single source of truth for DB config.
  * Reads all values from environment variables via dotenv.
- * Supports both PostgreSQL and MySQL via DB_DIALECT.
+ * Supports either a full DATABASE_URL or discrete DB_* variables.
  */
 
 require('dotenv').config();
 const { Sequelize } = require('sequelize');
 
-// ── Validate required env vars before doing anything ──────────────────────
+const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
 const required = ['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_DIALECT'];
-const missing = required.filter((key) => !process.env[key]);
 
-if (missing.length > 0) {
-  throw new Error(
-    `Missing required database environment variables: ${missing.join(', ')}\n` +
-    `Check your .env file against .env.example`
-  );
+if (!hasDatabaseUrl) {
+  const missing = required.filter((key) => !process.env[key]);
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Missing required database environment variables: ${missing.join(', ')}.\n` +
+      'Set DATABASE_URL or provide all DB_* variables.'
+    );
+  }
 }
 
-// ── Build Sequelize instance ───────────────────────────────────────────────
-const sequelize = new Sequelize(
-  process.env.DB_NAME,
-  process.env.DB_USER,
-  process.env.DB_PASSWORD,
-  {
-    host: process.env.DB_HOST,
-    port: parseInt(process.env.DB_PORT, 10) || 5432,
-    dialect: process.env.DB_DIALECT, // 'postgres' or 'mysql'
-
-        // ✅ ADD THIS BLOCK — required for Supabase
-    dialectOptions: {
+const dialect = process.env.DB_DIALECT || 'postgres';
+const useSsl = process.env.DB_SSL !== 'false';
+const dialectOptions = useSsl
+  ? {
       ssl: {
         require: true,
         rejectUnauthorized: false,
       },
-    },
+    }
+  : {};
 
-    // Connection pool — controls concurrent DB connections
-    pool: {
-      max: parseInt(process.env.DB_POOL_MAX, 10) || 10,
-      min: parseInt(process.env.DB_POOL_MIN, 10) || 2,
-      acquire: parseInt(process.env.DB_POOL_ACQUIRE, 10) || 30000, // ms to wait before throwing error
-      idle: parseInt(process.env.DB_POOL_IDLE, 10) || 10000,       // ms connection can be idle
-    },
-
-    // Logging — only show SQL queries in development
-    logging: process.env.NODE_ENV === 'development'
+const commonOptions = {
+  dialect,
+  dialectOptions,
+  pool: {
+    max: parseInt(process.env.DB_POOL_MAX, 10) || 10,
+    min: parseInt(process.env.DB_POOL_MIN, 10) || 2,
+    acquire: parseInt(process.env.DB_POOL_ACQUIRE, 10) || 30000,
+    idle: parseInt(process.env.DB_POOL_IDLE, 10) || 10000,
+  },
+  logging:
+    process.env.NODE_ENV === 'development'
       ? (msg) => console.log(`[SQL] ${msg}`)
       : false,
+  define: {
+    underscored: true,
+    freezeTableName: true,
+    timestamps: true,
+  },
+};
 
-    define: {
-      // Use snake_case column names in DB (createdAt → created_at)
-      underscored: true,
-      // Don't auto-pluralize table names
-      freezeTableName: true,
-      // Add created_at / updated_at to every model automatically
-      timestamps: true,
-    },
-  }
-);
+const sequelize = hasDatabaseUrl
+  ? new Sequelize(process.env.DATABASE_URL, commonOptions)
+  : new Sequelize(process.env.DB_NAME, process.env.DB_USER, process.env.DB_PASSWORD, {
+      ...commonOptions,
+      host: process.env.DB_HOST,
+      port: parseInt(process.env.DB_PORT, 10) || 5432,
+      dialect,
+    });
 
 module.exports = sequelize;
