@@ -31,6 +31,14 @@ const sequelize = new Sequelize(
     port: parseInt(process.env.DB_PORT, 10) || 5432,
     dialect: process.env.DB_DIALECT, // 'postgres' or 'mysql'
 
+        // ✅ ADD THIS BLOCK — required for Supabase
+    dialectOptions: {
+      ssl: {
+        require: true,
+        rejectUnauthorized: false,
+      },
+    },
+
     // Connection pool — controls concurrent DB connections
     pool: {
       max: parseInt(process.env.DB_POOL_MAX, 10) || 10,
