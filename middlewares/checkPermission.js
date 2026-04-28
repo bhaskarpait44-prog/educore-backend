@@ -1,18 +1,6 @@
 'use strict';
 const sequelize = require('../config/database');
 const { ADMIN_ROLES } = require('../utils/permissionConstants');
-const ACCOUNTANT_DEFAULT_PERMISSIONS = new Set([
-  'fees.view',
-  'fees.collect',
-  'fees.edit',
-  'fees.waive',
-  'fees.report',
-  'fees.refund',
-  'students.view',
-  'reports.fees',
-  'reports.export',
-  'audit.view',
-]);
 
 /**
  * Permission cache: user_id → Set of permission names
@@ -35,9 +23,6 @@ async function loadUserPermissions(userId, userRole = null) {
   `, { replacements: { userId } });
 
   const perms = new Set(rows.map(r => r.name));
-  if (perms.size === 0 && userRole === 'accountant') {
-    ACCOUNTANT_DEFAULT_PERMISSIONS.forEach((permission) => perms.add(permission));
-  }
   permCache.set(userId, { perms, expiry: Date.now() + CACHE_TTL });
   return perms;
 }
@@ -67,7 +52,7 @@ function clearPermissionCache(userId) {
  * requirePermission(permissionName)
  *
  * Returns middleware that checks if the authenticated user has the given permission.
- * admin and super_admin bypass permission checks automatically.
+ * admin users bypass permission checks automatically.
  *
  * Usage:
  *   router.post('/fees/waive', authenticate, requirePermission('fees.waive'), ctrl.waive);

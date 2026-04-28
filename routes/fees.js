@@ -21,6 +21,7 @@ router.get('/structures',
 router.post('/structure',
   requirePermission('fees.edit'),
   [
+    body('session_id').optional().isInt(),
     body('class_id').isInt(),
     body('name').notEmpty(),
     body('amount').isDecimal(),
@@ -72,7 +73,7 @@ router.post('/carry-forward',
 
 // Generate fees
 router.post('/generate',
-  requirePermission('fees.generate'),
+  requirePermission('fees.edit'),
   [
     body('session_id').isInt(),
   ],
@@ -84,6 +85,30 @@ router.post('/generate',
 router.get('/report',
   requirePermission('fees.report'),
   ctrl.getReport
+);
+
+// Dashboard summary
+router.get('/dashboard',
+  requirePermission('fees.view'),
+  ctrl.getDashboard
+);
+
+// Invoice register
+router.get('/invoices',
+  requirePermission('fees.view'),
+  ctrl.getInvoices
+);
+
+// Receipts register
+router.get('/receipts',
+  requirePermission('fees.view'),
+  ctrl.getReceipts
+);
+
+// Defaulters list
+router.get('/defaulters',
+  requirePermission('fees.view'),
+  ctrl.getDefaulters
 );
 
 // Get student fee details

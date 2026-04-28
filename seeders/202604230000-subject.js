@@ -138,7 +138,31 @@ module.exports = {
       allSubjects.push(...buildSubjects(classId));
     }
 
-    await queryInterface.bulkInsert('subjects', allSubjects, {});
+    const existingRows = await queryInterface.sequelize.query(
+      `
+        SELECT class_id, code
+        FROM subjects
+        WHERE code IN (:codes)
+      `,
+      {
+        replacements: { codes: allSubjects.map((subject) => subject.code) },
+        type: queryInterface.sequelize.QueryTypes.SELECT,
+      }
+    );
+
+    const existingKeys = new Set(
+      existingRows.map((row) => `${row.class_id}:${row.code}`)
+    );
+
+    const subjectsToInsert = allSubjects.filter(
+      (subject) => !existingKeys.has(`${subject.class_id}:${subject.code}`)
+    );
+
+    if (!subjectsToInsert.length) {
+      return;
+    }
+
+    await queryInterface.bulkInsert('subjects', subjectsToInsert, {});
   },
 
   async down(queryInterface) {

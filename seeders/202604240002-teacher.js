@@ -134,7 +134,29 @@ const userRows = teachers.map(({ name, email }) => ({
 
 module.exports = {
   async up(queryInterface) {
-    await queryInterface.bulkInsert('users', userRows, {});
+    const existingUsers = await queryInterface.sequelize.query(
+      `
+        SELECT email
+        FROM users
+        WHERE school_id = :schoolId
+          AND role = 'teacher'
+          AND email IN (:emails)
+      `,
+      {
+        replacements: {
+          schoolId: SCHOOL_ID,
+          emails: teachers.map((teacher) => teacher.email),
+        },
+        type: queryInterface.sequelize.QueryTypes.SELECT,
+      }
+    );
+
+    const existingEmails = new Set(existingUsers.map((row) => row.email));
+    const usersToInsert = userRows.filter((row) => !existingEmails.has(row.email));
+
+    if (usersToInsert.length) {
+      await queryInterface.bulkInsert('users', usersToInsert, {});
+    }
 
     console.log('\n[seed-teachers] Inserted 15 teacher users:');
     teachers.forEach((t, i) => {

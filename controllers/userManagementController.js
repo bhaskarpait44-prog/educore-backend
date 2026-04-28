@@ -5,22 +5,12 @@ const { Op }   = require('sequelize');
 const sequelize = require('../config/database');
 const { clearPermissionCache } = require('../middlewares/checkPermission');
 const profileVersioning = require('../utils/profileVersioning');
+const { normalizeUserRole } = require('../utils/roles');
 
-const ADMIN_ROLES = ['admin', 'super_admin'];
+const ADMIN_ROLES = ['admin'];
 const MANAGEABLE_USER_ROLES = ['admin', 'accountant', 'teacher', 'student', 'parent', 'staff', 'librarian', 'receptionist'];
+const USER_MANAGEMENT_ALLOWED_ROLES = ['admin', 'accountant'];
 const USER_ROLE_ENUM_NAME = 'enum_users_role';
-const ACCOUNTANT_PORTAL_PERMISSIONS = [
-  { name: 'fees.view', display_name: 'View Fee Records', category: 'fees', description: 'View fee structures, invoices, and payment history' },
-  { name: 'fees.collect', display_name: 'Collect Payments', category: 'fees', description: 'Record fee payments from students and parents' },
-  { name: 'fees.edit', display_name: 'Edit Fee Structure', category: 'fees', description: 'Modify fee components and amounts' },
-  { name: 'fees.waive', display_name: 'Waive or Concede Fees', category: 'fees', description: 'Grant fee waivers, concessions, or scholarships' },
-  { name: 'fees.report', display_name: 'Generate Fee Reports', category: 'fees', description: 'Access and export fee collection reports' },
-  { name: 'fees.refund', display_name: 'Process Refunds', category: 'fees', description: 'Issue refunds and reverse payments' },
-  { name: 'students.view', display_name: 'View Students', category: 'students', description: 'View student profiles and details' },
-  { name: 'reports.fees', display_name: 'Fee Reports', category: 'reports', description: 'Access fee collection and pending reports' },
-  { name: 'reports.export', display_name: 'Export Reports', category: 'reports', description: 'Download reports as PDF or Excel' },
-  { name: 'audit.view', display_name: 'View Audit Logs', category: 'audit', description: 'View all system audit trail entries' },
-];
 
 function splitStudentName(name = '') {
   const trimmed = String(name).trim().replace(/\s+/g, ' ');
@@ -32,7 +22,7 @@ function splitStudentName(name = '') {
 }
 
 async function ensureUserRoleEnumValue(role, transaction) {
-  if (!MANAGEABLE_USER_ROLES.includes(role) && role !== 'super_admin') return;
+  if (!MANAGEABLE_USER_ROLES.includes(role)) return;
 
   await sequelize.query(`
     DO $$
@@ -49,15 +39,7 @@ function resolvePermissionNamesForRole(role, permissionNames = []) {
   const normalized = Array.isArray(permissionNames)
     ? permissionNames.filter(Boolean).map((name) => String(name).trim())
     : [];
-
-  if (role !== 'accountant') {
-    return [...new Set(normalized)];
-  }
-
-  return [...new Set([
-    ...ACCOUNTANT_PORTAL_PERMISSIONS.map((permission) => permission.name),
-    ...normalized,
-  ])];
+  return [...new Set(normalized)];
 }
 
 async function ensurePermissionsExist(permissionDefs, transaction) {
@@ -94,10 +76,7 @@ const audit = async (tableName, recordId, changes, req) => {
 
 // ── Helper: check caller can manage target ────────────────────────────────
 function canManage(caller, targetRole) {
-  if (caller.role === 'super_admin') return true;           // super_admin can do anything
-  if (targetRole === 'super_admin') return false;           // only super_admin can manage super_admin
-  if (caller.role === 'admin') return true;                 // admin can manage all non-super_admin
-  return false;
+  return normalizeUserRole(caller.role) === 'admin';
 }
 
 // ── GET /api/admin/users ──────────────────────────────────────────────────
@@ -123,7 +102,7 @@ exports.list = async (req, res, next) => {
           'user' AS source_type,
           u.name,
           u.email,
-          u.role,
+          CASE WHEN u.role = 'super_admin' THEN 'admin' ELSE u.role END AS role,
           u.is_active,
           u.last_login_at,
           u.employee_id,
@@ -140,45 +119,8 @@ exports.list = async (req, res, next) => {
         LEFT JOIN users creator ON creator.id = u.created_by
         WHERE u.school_id = :schoolId
           AND u.is_deleted = false
+          AND u.role IN ('admin', 'super_admin', 'accountant')
         GROUP BY u.id, creator.name
-
-        UNION ALL
-
-        SELECT
-          CONCAT('student-', s.id) AS uid,
-          s.id AS source_id,
-          'student_portal' AS source_type,
-          CONCAT(s.first_name, ' ', s.last_name) AS name,
-          sp.email,
-          'student' AS role,
-          s.is_active,
-          s.last_login_at,
-          s.admission_no AS employee_id,
-          NULL::text AS department,
-          NULL::text AS designation,
-          sp.phone,
-          sp.photo_path AS profile_photo,
-          false AS force_password_change,
-          s.created_at,
-          0::int AS permission_count,
-          NULL::text AS created_by_name
-        FROM students s
-        LEFT JOIN student_profiles sp
-          ON sp.student_id = s.id
-         AND sp.is_current = true
-        WHERE s.school_id = :schoolId
-          AND s.is_deleted = false
-          AND NOT EXISTS (
-            SELECT 1
-            FROM users u
-            WHERE u.school_id = s.school_id
-              AND u.is_deleted = false
-              AND u.role = 'student'
-              AND (
-                LOWER(COALESCE(u.email, '')) = LOWER(COALESCE(sp.email, ''))
-                OR COALESCE(u.employee_id, '') = s.admission_no
-              )
-          )
       ),
       filtered_accounts AS (
         SELECT *
@@ -220,14 +162,18 @@ exports.list = async (req, res, next) => {
     `, { replacements });
 
     return res.ok({
-      users,
+      users: users.map((user) => ({
+        ...user,
+        role: normalizeUserRole(user.role),
+      })),
       pagination: {
         page: parseInt(page), perPage: parseInt(perPage),
         total: parseInt(cnt),
         totalPages: Math.ceil(parseInt(cnt) / parseInt(perPage)),
       },
       roleCounts: roleCounts.reduce((acc, r) => {
-        acc[r.role] = parseInt(r.cnt);
+        const role = normalizeUserRole(r.role);
+        acc[role] = (acc[role] || 0) + parseInt(r.cnt);
         return acc;
       }, {}),
     });
@@ -248,11 +194,10 @@ exports.create = async (req, res, next) => {
     } = req.body;
     const resolvedPermissionNames = resolvePermissionNamesForRole(role, permission_names);
 
-    if (!MANAGEABLE_USER_ROLES.includes(role)) {
-      return res.fail(`Invalid role. Allowed roles: ${MANAGEABLE_USER_ROLES.join(', ')}`, [], 422);
+    if (!USER_MANAGEMENT_ALLOWED_ROLES.includes(role)) {
+      return res.fail(`Invalid role. Allowed roles: ${USER_MANAGEMENT_ALLOWED_ROLES.join(', ')}`, [], 422);
     }
 
-    // Security: admin cannot create super_admin
     if (!canManage(req.user, role)) {
       return res.fail('You cannot create a user with this role.', [], 403);
     }
@@ -266,37 +211,6 @@ exports.create = async (req, res, next) => {
     );
     if (existing) return res.fail('Email already in use.', [], 409);
 
-    if (role === 'student') {
-      const resolvedAdmissionNo = String(admission_no || employee_id || '').trim();
-      if (!resolvedAdmissionNo) {
-        return res.fail('Admission number is required for student accounts.', [], 422);
-      }
-      if (!date_of_birth) {
-        return res.fail('Date of birth is required for student accounts.', [], 422);
-      }
-      if (!['male', 'female', 'other'].includes(gender)) {
-        return res.fail('Gender is required for student accounts.', [], 422);
-      }
-
-      const [[existingStudent]] = await sequelize.query(
-        `SELECT id FROM students WHERE school_id = :schoolId AND admission_no = :admissionNo AND is_deleted = false LIMIT 1;`,
-        { replacements: { schoolId, admissionNo: resolvedAdmissionNo } }
-      );
-      if (existingStudent) return res.fail('Admission number already in use.', [], 409);
-
-      const [[existingStudentEmail]] = await sequelize.query(`
-        SELECT sp.id
-        FROM student_profiles sp
-        JOIN students s ON s.id = sp.student_id
-        WHERE s.school_id = :schoolId
-          AND s.is_deleted = false
-          AND sp.is_current = true
-          AND LOWER(sp.email) = LOWER(:email)
-        LIMIT 1;
-      `, { replacements: { schoolId, email: normalizedEmail } });
-      if (existingStudentEmail) return res.fail('Student email already in use.', [], 409);
-    }
-
     // Generate or hash password
     let rawPassword = password;
     if (auto_password || !password) {
@@ -305,8 +219,6 @@ exports.create = async (req, res, next) => {
     const hash = await bcrypt.hash(rawPassword, 12);
 
     let user;
-    let studentPortalMeta = null;
-
     await sequelize.transaction(async (t) => {
       await ensureUserRoleEnumValue(role, t);
 
@@ -326,7 +238,7 @@ exports.create = async (req, res, next) => {
         replacements: {
           schoolId, name, email: normalizedEmail, hash, role,
           phone: phone || null,
-          employee_id: role === 'student' ? (admission_no || employee_id || null) : (employee_id || null),
+          employee_id: employee_id || null,
           department: department || null,
           designation: designation || null,
           joining_date: joining_date || null,
@@ -345,75 +257,12 @@ exports.create = async (req, res, next) => {
         transaction: t,
       });
 
-      user = createdUser;
+      user = {
+        ...createdUser,
+        role: normalizeUserRole(createdUser.role),
+      };
 
-      if (role === 'student') {
-        const resolvedAdmissionNo = String(admission_no || employee_id || '').trim();
-        const { firstName, lastName } = splitStudentName(name);
-
-        const [[student]] = await sequelize.query(`
-          INSERT INTO students (
-            school_id,
-            admission_no,
-            first_name,
-            last_name,
-            date_of_birth,
-            gender,
-            password_hash,
-            is_active,
-            last_password_change,
-            is_deleted,
-            created_at,
-            updated_at
-          )
-          VALUES (
-            :schoolId,
-            :admissionNo,
-            :firstName,
-            :lastName,
-            :dateOfBirth,
-            :gender,
-            :hash,
-            true,
-            NOW(),
-            false,
-            NOW(),
-            NOW()
-          )
-          RETURNING id, admission_no;
-        `, {
-          replacements: {
-            schoolId,
-            admissionNo: resolvedAdmissionNo,
-            firstName,
-            lastName,
-            dateOfBirth: date_of_birth,
-            gender,
-            hash,
-          },
-          transaction: t,
-        });
-
-        await profileVersioning.create({
-          studentId: student.id,
-          data: {
-            phone: phone || null,
-            email: normalizedEmail,
-            address: address || null,
-          },
-          changedBy: req.user.id,
-          changeReason: 'Initial profile created from user management',
-          transaction: t,
-        });
-
-        studentPortalMeta = {
-          student_id: student.id,
-          admission_no: student.admission_no,
-          login_email: normalizedEmail,
-        };
-      }
-
-      if (resolvedPermissionNames.length > 0 && role !== 'student') {
+      if (resolvedPermissionNames.length > 0) {
         if (!ADMIN_ROLES.includes(req.user.role)) {
           const { loadUserPermissions } = require('../middlewares/checkPermission');
           const callerPerms = await loadUserPermissions(req.user.id);
@@ -421,10 +270,6 @@ exports.create = async (req, res, next) => {
           if (forbidden.length > 0) {
             throw Object.assign(new Error(`Cannot grant permissions you don't have: ${forbidden.join(', ')}`), { status: 403 });
           }
-        }
-
-        if (role === 'accountant') {
-          await ensurePermissionsExist(ACCOUNTANT_PORTAL_PERMISSIONS, t);
         }
 
         const [perms] = await sequelize.query(
@@ -455,9 +300,8 @@ exports.create = async (req, res, next) => {
     return res.ok(
       {
         user,
-        ...(studentPortalMeta ? { student_portal: studentPortalMeta } : {}),
         ...(auto_password || !password ? { generated_password: rawPassword } : {}),
-        permissions_assigned: role === 'student' ? 0 : resolvedPermissionNames.length,
+        permissions_assigned: resolvedPermissionNames.length,
       },
       'User created successfully.',
       201
@@ -499,7 +343,12 @@ exports.getById = async (req, res, next) => {
       ORDER BY p.category, p.name;
     `, { replacements: { userId: id } });
 
-    return res.ok({ ...user, permission_names: userPerms.map(p => p.name), permissions: userPerms });
+    return res.ok({
+      ...user,
+      role: normalizeUserRole(user.role),
+      permission_names: userPerms.map(p => p.name),
+      permissions: userPerms,
+    });
   } catch (err) { next(err); }
 };
 
@@ -709,7 +558,7 @@ exports.downloadImportTemplate = async (req, res, next) => {
       { key: 'department',   label: 'Department',     example: 'Science'              },
       { key: 'designation',  label: 'Designation',    example: 'Senior Teacher'       },
     ],
-    valid_roles: ['admin', 'accountant', 'teacher', 'student', 'parent'],
+    valid_roles: ['admin', 'accountant'],
     notes: [
       'All fields marked * are required.',
       'Email must be unique across the system.',
@@ -751,7 +600,7 @@ exports.previewImport = async (req, res, next) => {
         }
       }
 
-      const validRoles = ['admin', 'accountant', 'teacher', 'student', 'parent'];
+      const validRoles = ['admin', 'accountant'];
       if (!row.role?.trim()) errors.push('Role is required');
       else if (!validRoles.includes(row.role.trim().toLowerCase())) {
         errors.push(`Invalid role. Must be one of: ${validRoles.join(', ')}`);
@@ -804,10 +653,6 @@ exports.confirmImport = async (req, res, next) => {
           const name = `${row.first_name.trim()} ${row.last_name.trim()}`;
 
           await ensureUserRoleEnumValue(normalizedRole);
-          if (normalizedRole === 'accountant') {
-            await ensurePermissionsExist(ACCOUNTANT_PORTAL_PERMISSIONS);
-          }
-
           const [[createdUser]] = await sequelize.query(`
             INSERT INTO users
               (school_id, name, email, password_hash, role, phone, employee_id,

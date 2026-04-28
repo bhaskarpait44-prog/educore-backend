@@ -25,7 +25,9 @@ if (!hasDatabaseUrl) {
 }
 
 const dialect = process.env.DB_DIALECT || 'postgres';
-const useSsl = process.env.DB_SSL !== 'false';
+const useSsl =
+  process.env.DB_SSL === 'true' ||
+  (hasDatabaseUrl && process.env.DB_SSL !== 'false');
 const dialectOptions = useSsl
   ? {
       ssl: {

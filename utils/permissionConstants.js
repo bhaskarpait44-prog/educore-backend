@@ -63,6 +63,6 @@ const PERMISSIONS = {
 };
 
 // Roles that have full access regardless of permission table
-const ADMIN_ROLES = ['admin', 'super_admin'];
+const ADMIN_ROLES = ['admin'];
 
 module.exports = { PERMISSIONS, ADMIN_ROLES };

@@ -4,7 +4,7 @@ const router = require('express').Router();
 const { requireRole } = require('../middlewares/auth');
 const ctrl = require('../controllers/adminTeacherControlController');
 
-router.use(requireRole('admin', 'super_admin'));
+router.use(requireRole('admin'));
 
 router.get('/overview', ctrl.overview);
 router.get('/teachers', ctrl.teachers);

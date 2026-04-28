@@ -3,7 +3,7 @@
 const router   = require('express').Router();
 const { body, param } = require('express-validator');
 const validate = require('../middlewares/validate');
-const { requireAdmin, requireAdminOrTeacher } = require('../middlewares/auth');
+const { requireAdmin, requireAdminOrTeacherOrAccountant } = require('../middlewares/auth');
 const ctrl     = require('../controllers/studentController');
 
 router.post('/',                  requireAdmin, [
@@ -15,9 +15,9 @@ router.post('/',                  requireAdmin, [
   body('profile.email').isEmail().withMessage('A valid student email is required'),
 ], validate, ctrl.admit);
 
-router.get('/',                   requireAdminOrTeacher, ctrl.list);
+router.get('/',                   requireAdminOrTeacherOrAccountant, ctrl.list);
 
-router.get('/:id',                requireAdminOrTeacher, [
+router.get('/:id',                requireAdminOrTeacherOrAccountant, [
   param('id').isInt(),
 ], validate, ctrl.getById);
 
@@ -42,7 +42,7 @@ router.delete('/:id',             requireAdmin, [
   body('reason').optional({ nullable: true }).trim(),
 ], validate, ctrl.remove);
 
-router.get('/:id/history',        requireAdminOrTeacher, [
+router.get('/:id/history',        requireAdminOrTeacherOrAccountant, [
   param('id').isInt(),
 ], validate, ctrl.getHistory);
 

@@ -8,6 +8,7 @@ const validate = require('../middlewares/validate');
 const sequelize = require('../config/database');
 const studentLoginValidation = require('../middlewares/studentLoginValidator');
 const { loadUserPermissions } = require('../middlewares/checkPermission');
+const { normalizeUserRole } = require('../utils/roles');
 
 router.post('/login',
   [body('email').isEmail(), body('password').notEmpty()],
@@ -29,7 +30,8 @@ router.post('/login',
       const valid = await bcrypt.compare(password, user.password_hash);
       if (!valid) return res.fail('Invalid credentials.', [], 401);
 
-      const permissions = Array.from(await loadUserPermissions(user.id, user.role));
+      const normalizedRole = normalizeUserRole(user.role);
+      const permissions = Array.from(await loadUserPermissions(user.id, normalizedRole));
 
       await sequelize.query(`
         UPDATE users
@@ -38,7 +40,7 @@ router.post('/login',
       `, { replacements: { id: user.id } });
 
       const token = jwt.sign(
-        { userId: user.id, schoolId: user.school_id, role: user.role },
+        { userId: user.id, schoolId: user.school_id, role: normalizedRole },
         process.env.JWT_SECRET,
         { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
       );
@@ -56,7 +58,7 @@ router.post('/login',
           id: user.id,
           name: user.name,
           email: user.email,
-          role: user.role,
+          role: normalizedRole,
           school_id: user.school_id,
           force_password_change: user.force_password_change,
           permissions,
@@ -116,8 +118,10 @@ router.post('/refresh',
         return res.fail('Account not found or deactivated.', [], 401);
       }
 
+      const normalizedRole = normalizeUserRole(user.role);
+
       const token = jwt.sign(
-        { userId: user.id, schoolId: user.school_id, role: user.role },
+        { userId: user.id, schoolId: user.school_id, role: normalizedRole },
         process.env.JWT_SECRET,
         { expiresIn: process.env.JWT_EXPIRES_IN || '8h' }
       );

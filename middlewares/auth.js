@@ -8,6 +8,7 @@
 
 const jwt = require('jsonwebtoken');
 const sequelize = require('../config/database');
+const { normalizeUserRole } = require('../utils/roles');
 
 const JWT_SECRET = process.env.JWT_SECRET;
 
@@ -110,7 +111,10 @@ const authenticate = async (req, res, next) => {
       });
     }
 
-    req.user = user;
+    req.user = {
+      ...user,
+      role: normalizeUserRole(user.role),
+    };
     next();
   } catch (err) {
     const message = err.name === 'TokenExpiredError'
@@ -127,12 +131,14 @@ const authenticate = async (req, res, next) => {
 };
 
 const requireRole = (...roles) => (req, res, next) => {
-  if (!roles.includes(req.user.role)) {
+  const normalizedRole = normalizeUserRole(req.user.role);
+
+  if (!roles.includes(normalizedRole)) {
     return res.status(403).json({
       success: false,
       data: null,
       message: `Access denied. Required role: ${roles.join(' or ')}.`,
-      errors: [`Your role '${req.user.role}' is not permitted for this action`],
+      errors: [`Your role '${normalizedRole}' is not permitted for this action`],
     });
   }
   next();
@@ -140,6 +146,14 @@ const requireRole = (...roles) => (req, res, next) => {
 
 const requireAdmin = requireRole('admin');
 const requireAdminOrTeacher = requireRole('admin', 'teacher');
+const requireAdminOrTeacherOrAccountant = requireRole('admin', 'teacher', 'accountant');
 const requireAdminOrAccountant = requireRole('admin', 'accountant');
 
-module.exports = { authenticate, requireRole, requireAdmin, requireAdminOrTeacher, requireAdminOrAccountant };
+module.exports = {
+  authenticate,
+  requireRole,
+  requireAdmin,
+  requireAdminOrTeacher,
+  requireAdminOrTeacherOrAccountant,
+  requireAdminOrAccountant,
+};

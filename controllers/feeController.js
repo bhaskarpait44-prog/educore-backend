@@ -3,6 +3,33 @@
 const sequelize  = require('../config/database');
 const feeManager = require('../utils/feeManager');
 
+async function resolveSessionId(requestedSessionId, schoolId) {
+  if (requestedSessionId) {
+    const [[selectedSession]] = await sequelize.query(`
+      SELECT id
+      FROM sessions
+      WHERE id = :sessionId AND school_id = :schoolId
+      LIMIT 1;
+    `, {
+      replacements: {
+        sessionId: requestedSessionId,
+        schoolId,
+      },
+    });
+
+    if (selectedSession) return selectedSession.id;
+  }
+
+  const [[currentSession]] = await sequelize.query(`
+    SELECT id
+    FROM sessions
+    WHERE school_id = :schoolId AND is_current = true
+    LIMIT 1;
+  `, { replacements: { schoolId } });
+
+  return currentSession?.id || null;
+}
+
 // GET /api/fees/structures - List fee structures
 exports.getStructures = async (req, res, next) => {
   try {
@@ -37,12 +64,30 @@ exports.getStructures = async (req, res, next) => {
 
 exports.createStructure = async (req, res, next) => {
   try {
-    const { class_id, name, amount, frequency, due_day } = req.body;
+    const { session_id, class_id, name, amount, frequency, due_day } = req.body;
 
-    // Find current session for this school
-    const [[session]] = await sequelize.query(`
-      SELECT id FROM sessions WHERE school_id = :schoolId AND is_current = true LIMIT 1;
-    `, { replacements: { schoolId: req.user.school_id } });
+    let session = null;
+    if (session_id) {
+      const [[selectedSession]] = await sequelize.query(`
+        SELECT id
+        FROM sessions
+        WHERE id = :sessionId AND school_id = :schoolId
+        LIMIT 1;
+      `, {
+        replacements: {
+          sessionId: session_id,
+          schoolId : req.user.school_id,
+        },
+      });
+      session = selectedSession || null;
+    }
+
+    if (!session) {
+      const [[currentSession]] = await sequelize.query(`
+        SELECT id FROM sessions WHERE school_id = :schoolId AND is_current = true LIMIT 1;
+      `, { replacements: { schoolId: req.user.school_id } });
+      session = currentSession || null;
+    }
 
     if (!session) return res.fail('No active session found. Activate a session first.');
 
@@ -52,13 +97,7 @@ exports.createStructure = async (req, res, next) => {
       RETURNING id, session_id, class_id, name, amount, frequency, due_day, is_active;
     `, { replacements: { session_id: session.id, class_id, name, amount, frequency, due_day } });
 
-    const generation = await feeManager.generateInvoices(session.id);
-
-    res.ok({
-      ...structure,
-      invoices_generated: generation?.invoicesCreated || 0,
-      invoices_skipped: generation?.invoicesSkipped || 0,
-    }, 'Fee structure created and invoices generated.', 201);
+    res.ok(structure, 'Fee structure created.', 201);
   } catch (err) { next(err); }
 };
 
@@ -153,7 +192,7 @@ exports.getReport = async (req, res, next) => {
         COUNT(CASE WHEN fi.status = 'pending' THEN 1 END) AS pending_count
       FROM fee_invoices fi
       JOIN enrollments e ON e.id = fi.enrollment_id
-      WHERE fi.session_id = :sessionId AND e.status = 'active'
+      WHERE e.session_id = :sessionId AND e.status = 'active'
       ${class_id ? 'AND e.class_id = :classId' : ''}
     `, { replacements: { sessionId: session_id, classId: class_id } });
 
@@ -186,5 +225,346 @@ exports.getReport = async (req, res, next) => {
       },
       students,
     });
+  } catch (err) { next(err); }
+};
+
+exports.getDashboard = async (req, res, next) => {
+  try {
+    const sessionId = await resolveSessionId(req.query.session_id, req.user.school_id);
+    if (!sessionId) return res.fail('No active session found.', [], 404);
+
+    const [[summary]] = await sequelize.query(`
+      SELECT
+        COUNT(fi.id)::int AS total_invoices,
+        COUNT(*) FILTER (WHERE fi.status = 'paid')::int AS paid_invoices,
+        COUNT(*) FILTER (WHERE fi.status = 'partial')::int AS partial_invoices,
+        COUNT(*) FILTER (WHERE fi.status = 'pending')::int AS pending_invoices,
+        COUNT(*) FILTER (
+          WHERE fi.status IN ('pending', 'partial')
+            AND fi.due_date < CURRENT_DATE
+        )::int AS overdue_invoices,
+        COALESCE(SUM(fi.amount_due), 0) AS total_expected,
+        COALESCE(SUM(fi.amount_paid), 0) AS total_collected,
+        COALESCE(SUM(fi.amount_due + fi.late_fee_amount - fi.concession_amount - fi.amount_paid), 0) AS total_balance
+      FROM fee_invoices fi
+      JOIN enrollments e ON e.id = fi.enrollment_id
+      JOIN students s ON s.id = e.student_id
+      WHERE e.session_id = :sessionId
+        AND s.school_id = :schoolId;
+    `, {
+      replacements: {
+        sessionId,
+        schoolId: req.user.school_id,
+      },
+    });
+
+    const [recentPayments] = await sequelize.query(`
+      SELECT
+        fp.id,
+        fp.amount,
+        fp.payment_date,
+        fp.payment_mode,
+        COALESCE(NULLIF(fp.transaction_ref, ''), CONCAT('RCPT-', fp.id)) AS receipt_no,
+        fs.name AS fee_name,
+        fi.id AS invoice_id,
+        s.id AS student_id,
+        s.admission_no,
+        s.first_name || ' ' || s.last_name AS student_name,
+        c.name AS class_name
+      FROM fee_payments fp
+      JOIN fee_invoices fi ON fi.id = fp.invoice_id
+      JOIN fee_structures fs ON fs.id = fi.fee_structure_id
+      JOIN enrollments e ON e.id = fi.enrollment_id
+      JOIN students s ON s.id = e.student_id
+      LEFT JOIN classes c ON c.id = e.class_id
+      WHERE e.session_id = :sessionId
+        AND s.school_id = :schoolId
+      ORDER BY fp.payment_date DESC, fp.id DESC
+      LIMIT 8;
+    `, {
+      replacements: {
+        sessionId,
+        schoolId: req.user.school_id,
+      },
+    });
+
+    const [defaulters] = await sequelize.query(`
+      SELECT
+        s.id AS student_id,
+        s.admission_no,
+        s.first_name || ' ' || s.last_name AS student_name,
+        c.name AS class_name,
+        COUNT(fi.id)::int AS open_invoices,
+        MAX(fi.due_date) AS last_due_date,
+        COALESCE(SUM(fi.amount_due + fi.late_fee_amount - fi.concession_amount - fi.amount_paid), 0) AS balance
+      FROM fee_invoices fi
+      JOIN enrollments e ON e.id = fi.enrollment_id
+      JOIN students s ON s.id = e.student_id
+      LEFT JOIN classes c ON c.id = e.class_id
+      WHERE e.session_id = :sessionId
+        AND s.school_id = :schoolId
+        AND fi.status IN ('pending', 'partial')
+      GROUP BY s.id, s.admission_no, s.first_name, s.last_name, c.name
+      ORDER BY balance DESC, last_due_date ASC
+      LIMIT 8;
+    `, {
+      replacements: {
+        sessionId,
+        schoolId: req.user.school_id,
+      },
+    });
+
+    res.ok({
+      session_id: sessionId,
+      summary: {
+        ...summary,
+        collection_rate: Number(summary?.total_expected || 0) > 0
+          ? Number(((Number(summary.total_collected) / Number(summary.total_expected)) * 100).toFixed(2))
+          : 0,
+      },
+      recent_payments: recentPayments,
+      defaulters,
+    }, 'Accountant dashboard loaded.');
+  } catch (err) { next(err); }
+};
+
+exports.getInvoices = async (req, res, next) => {
+  try {
+    const sessionId = await resolveSessionId(req.query.session_id, req.user.school_id);
+    if (!sessionId) return res.fail('No active session found.', [], 404);
+
+    const {
+      class_id,
+      status,
+      search = '',
+      page = 1,
+      perPage = 20,
+    } = req.query;
+
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const limitNum = Math.max(parseInt(perPage, 10) || 20, 1);
+    const offset = (pageNum - 1) * limitNum;
+
+    const replacements = {
+      sessionId,
+      schoolId: req.user.school_id,
+      classId: class_id || null,
+      status: status || null,
+      search: `%${search}%`,
+      limit: limitNum,
+      offset,
+    };
+
+    const whereClause = `
+      e.session_id = :sessionId
+      AND s.school_id = :schoolId
+      AND (:classId IS NULL OR e.class_id = CAST(:classId AS INTEGER))
+      AND (:status IS NULL OR fi.status = :status)
+      AND (
+        :search = '%%'
+        OR s.admission_no ILIKE :search
+        OR CONCAT(s.first_name, ' ', s.last_name) ILIKE :search
+        OR fs.name ILIKE :search
+      )
+    `;
+
+    const [[metaRow]] = await sequelize.query(`
+      SELECT COUNT(fi.id)::int AS total
+      FROM fee_invoices fi
+      JOIN enrollments e ON e.id = fi.enrollment_id
+      JOIN students s ON s.id = e.student_id
+      JOIN fee_structures fs ON fs.id = fi.fee_structure_id
+      WHERE ${whereClause};
+    `, { replacements });
+
+    const [invoices] = await sequelize.query(`
+      SELECT
+        fi.id,
+        fi.due_date,
+        fi.amount_due,
+        fi.amount_paid,
+        fi.late_fee_amount,
+        fi.concession_amount,
+        fi.status,
+        fi.carry_from_invoice_id,
+        fs.name AS fee_name,
+        s.id AS student_id,
+        s.admission_no,
+        s.first_name || ' ' || s.last_name AS student_name,
+        c.name AS class_name,
+        sec.name AS section_name,
+        COALESCE(fi.amount_due + fi.late_fee_amount - fi.concession_amount - fi.amount_paid, 0) AS balance
+      FROM fee_invoices fi
+      JOIN enrollments e ON e.id = fi.enrollment_id
+      JOIN students s ON s.id = e.student_id
+      JOIN fee_structures fs ON fs.id = fi.fee_structure_id
+      LEFT JOIN classes c ON c.id = e.class_id
+      LEFT JOIN sections sec ON sec.id = e.section_id
+      WHERE ${whereClause}
+      ORDER BY fi.due_date ASC, fi.id DESC
+      LIMIT :limit OFFSET :offset;
+    `, { replacements });
+
+    res.ok({
+      invoices,
+      meta: {
+        page: pageNum,
+        perPage: limitNum,
+        total: metaRow.total,
+        totalPages: Math.max(Math.ceil(metaRow.total / limitNum), 1),
+      },
+    }, 'Invoices loaded.');
+  } catch (err) { next(err); }
+};
+
+exports.getReceipts = async (req, res, next) => {
+  try {
+    const sessionId = await resolveSessionId(req.query.session_id, req.user.school_id);
+    if (!sessionId) return res.fail('No active session found.', [], 404);
+
+    const {
+      class_id,
+      payment_mode,
+      search = '',
+      from,
+      to,
+      page = 1,
+      perPage = 20,
+    } = req.query;
+
+    const pageNum = Math.max(parseInt(page, 10) || 1, 1);
+    const limitNum = Math.max(parseInt(perPage, 10) || 20, 1);
+    const offset = (pageNum - 1) * limitNum;
+
+    const replacements = {
+      sessionId,
+      schoolId: req.user.school_id,
+      classId: class_id || null,
+      paymentMode: payment_mode || null,
+      search: `%${search}%`,
+      from: from || null,
+      to: to || null,
+      limit: limitNum,
+      offset,
+    };
+
+    const whereClause = `
+      e.session_id = :sessionId
+      AND s.school_id = :schoolId
+      AND (:classId IS NULL OR e.class_id = CAST(:classId AS INTEGER))
+      AND (:paymentMode IS NULL OR fp.payment_mode = :paymentMode)
+      AND (:from IS NULL OR fp.payment_date >= CAST(:from AS DATE))
+      AND (:to IS NULL OR fp.payment_date <= CAST(:to AS DATE))
+      AND (
+        :search = '%%'
+        OR s.admission_no ILIKE :search
+        OR CONCAT(s.first_name, ' ', s.last_name) ILIKE :search
+        OR COALESCE(fp.transaction_ref, '') ILIKE :search
+        OR fs.name ILIKE :search
+      )
+    `;
+
+    const [[metaRow]] = await sequelize.query(`
+      SELECT COUNT(fp.id)::int AS total
+      FROM fee_payments fp
+      JOIN fee_invoices fi ON fi.id = fp.invoice_id
+      JOIN enrollments e ON e.id = fi.enrollment_id
+      JOIN students s ON s.id = e.student_id
+      JOIN fee_structures fs ON fs.id = fi.fee_structure_id
+      WHERE ${whereClause};
+    `, { replacements });
+
+    const [receipts] = await sequelize.query(`
+      SELECT
+        fp.id,
+        fp.amount,
+        fp.payment_date,
+        fp.payment_mode,
+        COALESCE(NULLIF(fp.transaction_ref, ''), CONCAT('RCPT-', fp.id)) AS receipt_no,
+        fi.id AS invoice_id,
+        fs.name AS fee_name,
+        s.id AS student_id,
+        s.admission_no,
+        s.first_name || ' ' || s.last_name AS student_name,
+        c.name AS class_name,
+        sec.name AS section_name,
+        u.name AS received_by_name
+      FROM fee_payments fp
+      JOIN fee_invoices fi ON fi.id = fp.invoice_id
+      JOIN enrollments e ON e.id = fi.enrollment_id
+      JOIN students s ON s.id = e.student_id
+      JOIN fee_structures fs ON fs.id = fi.fee_structure_id
+      LEFT JOIN classes c ON c.id = e.class_id
+      LEFT JOIN sections sec ON sec.id = e.section_id
+      LEFT JOIN users u ON u.id = fp.received_by
+      WHERE ${whereClause}
+      ORDER BY fp.payment_date DESC, fp.id DESC
+      LIMIT :limit OFFSET :offset;
+    `, { replacements });
+
+    res.ok({
+      receipts,
+      meta: {
+        page: pageNum,
+        perPage: limitNum,
+        total: metaRow.total,
+        totalPages: Math.max(Math.ceil(metaRow.total / limitNum), 1),
+      },
+    }, 'Receipts loaded.');
+  } catch (err) { next(err); }
+};
+
+exports.getDefaulters = async (req, res, next) => {
+  try {
+    const sessionId = await resolveSessionId(req.query.session_id, req.user.school_id);
+    if (!sessionId) return res.fail('No active session found.', [], 404);
+
+    const {
+      class_id,
+      search = '',
+    } = req.query;
+
+    const replacements = {
+      sessionId,
+      schoolId: req.user.school_id,
+      classId: class_id || null,
+      search: `%${search}%`,
+    };
+
+    const [defaulters] = await sequelize.query(`
+      SELECT
+        s.id AS student_id,
+        s.admission_no,
+        s.first_name || ' ' || s.last_name AS student_name,
+        c.name AS class_name,
+        sec.name AS section_name,
+        COUNT(fi.id)::int AS open_invoices,
+        MIN(fi.due_date) AS first_due_date,
+        MAX(fi.due_date) AS last_due_date,
+        COUNT(*) FILTER (
+          WHERE fi.due_date < CURRENT_DATE
+            AND fi.status IN ('pending', 'partial')
+        )::int AS overdue_invoices,
+        COALESCE(SUM(fi.amount_due + fi.late_fee_amount - fi.concession_amount - fi.amount_paid), 0) AS balance
+      FROM fee_invoices fi
+      JOIN enrollments e ON e.id = fi.enrollment_id
+      JOIN students s ON s.id = e.student_id
+      LEFT JOIN classes c ON c.id = e.class_id
+      LEFT JOIN sections sec ON sec.id = e.section_id
+      WHERE e.session_id = :sessionId
+        AND s.school_id = :schoolId
+        AND fi.status IN ('pending', 'partial')
+        AND (:classId IS NULL OR e.class_id = CAST(:classId AS INTEGER))
+        AND (
+          :search = '%%'
+          OR s.admission_no ILIKE :search
+          OR CONCAT(s.first_name, ' ', s.last_name) ILIKE :search
+        )
+      GROUP BY s.id, s.admission_no, s.first_name, s.last_name, c.name, sec.name
+      HAVING COALESCE(SUM(fi.amount_due + fi.late_fee_amount - fi.concession_amount - fi.amount_paid), 0) > 0
+      ORDER BY balance DESC, first_due_date ASC;
+    `, { replacements });
+
+    res.ok({ defaulters }, 'Defaulters loaded.');
   } catch (err) { next(err); }
 };
