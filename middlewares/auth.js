@@ -146,14 +146,10 @@ const requireRole = (...roles) => (req, res, next) => {
 
 const requireAdmin = requireRole('admin');
 const requireAdminOrTeacher = requireRole('admin', 'teacher');
-const requireAdminOrTeacherOrAccountant = requireRole('admin', 'teacher', 'accountant');
-const requireAdminOrAccountant = requireRole('admin', 'accountant');
 
 module.exports = {
   authenticate,
   requireRole,
   requireAdmin,
   requireAdminOrTeacher,
-  requireAdminOrTeacherOrAccountant,
-  requireAdminOrAccountant,
 };

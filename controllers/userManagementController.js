@@ -8,8 +8,8 @@ const profileVersioning = require('../utils/profileVersioning');
 const { normalizeUserRole } = require('../utils/roles');
 
 const ADMIN_ROLES = ['admin'];
-const MANAGEABLE_USER_ROLES = ['admin', 'accountant', 'teacher', 'student', 'parent', 'staff', 'librarian', 'receptionist'];
-const USER_MANAGEMENT_ALLOWED_ROLES = ['admin', 'accountant'];
+const MANAGEABLE_USER_ROLES = ['admin', 'teacher', 'student', 'parent', 'staff', 'librarian', 'receptionist'];
+const USER_MANAGEMENT_ALLOWED_ROLES = ['admin', 'teacher', 'student'];
 const USER_ROLE_ENUM_NAME = 'enum_users_role';
 
 function splitStudentName(name = '') {
@@ -119,7 +119,7 @@ exports.list = async (req, res, next) => {
         LEFT JOIN users creator ON creator.id = u.created_by
         WHERE u.school_id = :schoolId
           AND u.is_deleted = false
-          AND u.role IN ('admin', 'super_admin', 'accountant')
+          AND u.role IN ('admin', 'super_admin', 'teacher', 'student')
         GROUP BY u.id, creator.name
       ),
       filtered_accounts AS (
@@ -558,7 +558,7 @@ exports.downloadImportTemplate = async (req, res, next) => {
       { key: 'department',   label: 'Department',     example: 'Science'              },
       { key: 'designation',  label: 'Designation',    example: 'Senior Teacher'       },
     ],
-    valid_roles: ['admin', 'accountant'],
+    valid_roles: ['admin', 'teacher', 'student'],
     notes: [
       'All fields marked * are required.',
       'Email must be unique across the system.',
@@ -600,7 +600,7 @@ exports.previewImport = async (req, res, next) => {
         }
       }
 
-      const validRoles = ['admin', 'accountant'];
+      const validRoles = ['admin', 'teacher', 'student'];
       if (!row.role?.trim()) errors.push('Role is required');
       else if (!validRoles.includes(row.role.trim().toLowerCase())) {
         errors.push(`Invalid role. Must be one of: ${validRoles.join(', ')}`);

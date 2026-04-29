@@ -4,7 +4,6 @@ const ROLE_VALUES = [
   'super_admin',
   'admin',
   'teacher',
-  'accountant',
   'staff',
   'student',
   'parent',

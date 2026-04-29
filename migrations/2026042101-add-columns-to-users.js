@@ -34,7 +34,6 @@ module.exports = {
     await queryInterface.sequelize.query(`
       DO $$ BEGIN
         ALTER TYPE "enum_users_role" ADD VALUE IF NOT EXISTS 'super_admin';
-        ALTER TYPE "enum_users_role" ADD VALUE IF NOT EXISTS 'accountant';
         ALTER TYPE "enum_users_role" ADD VALUE IF NOT EXISTS 'student';
         ALTER TYPE "enum_users_role" ADD VALUE IF NOT EXISTS 'parent';
         ALTER TYPE "enum_users_role" ADD VALUE IF NOT EXISTS 'librarian';

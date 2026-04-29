@@ -20,7 +20,6 @@ module.exports = {
           'super_admin',
           'admin',
           'teacher',
-          'accountant',
           'staff',
           'student',
           'parent',
