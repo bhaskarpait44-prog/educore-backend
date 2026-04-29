@@ -72,6 +72,12 @@ schema chain is:
 53. `20260422000001-create-student-subjects.js`
 54. `20260423000001-ensure-user-role-enum-values.js`
 55. `20260426000100-create-chat-conversations-and-messages.js`
+56. `202604290001-restore-accountant-role-and-fee-foundation.js`
+57. `202604290002-create-cheque-payments.js`
+58. `202604290003-create-fee-refunds.js`
+59. `202604290004-create-fee-carry-forwards.js`
+60. `202604290005-create-collection-targets.js`
+61. `202604290006-add-advanced-finance-columns-to-fee-invoices.js`
 
 ## Legacy duplicate migrations
 

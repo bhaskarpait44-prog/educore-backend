@@ -7,6 +7,7 @@ const USER_ROLES = [
   'super_admin',
   'admin',
   'teacher',
+  'accountant',
   'staff',
   'student',
   'parent',

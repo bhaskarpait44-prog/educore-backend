@@ -10,7 +10,7 @@ require('./models');
 
 const respond = require('./middlewares/respond');
 const errorHandler = require('./middlewares/errorHandler');
-const { authenticate } = require('./middlewares/auth');
+const { authenticate, requireRole } = require('./middlewares/auth');
 const {
   requirePermission,
   attachUserPermissions,
@@ -63,6 +63,11 @@ app.use('/api/attendance',
 app.use('/api/fees',
   requirePermission('fees.view'),
   require('./routes/fees')
+);
+
+app.use('/api/accountant',
+  requireRole('admin', 'accountant'),
+  require('./routes/accountant')
 );
 
 app.use('/api/exams',
