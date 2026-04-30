@@ -10,6 +10,10 @@ const createClassRules = [
   body('order_number')
     .notEmpty().withMessage('Order number is required')
     .isInt({ min: 1 }).withMessage('Order number must be a positive integer'),
+  body('stream')
+    .optional({ nullable: true, checkFalsy: true })
+    .trim()
+    .isIn(['arts', 'commerce', 'science']).withMessage('Stream must be Arts, Commerce, or Science'),
   body('display_name')
     .optional({ nullable: true })
     .trim()
@@ -37,6 +41,10 @@ const updateClassRules = [
   body('order_number')
     .optional()
     .isInt({ min: 1 }).withMessage('Order number must be a positive integer'),
+  body('stream')
+    .optional({ nullable: true, checkFalsy: true })
+    .trim()
+    .isIn(['arts', 'commerce', 'science']).withMessage('Stream must be Arts, Commerce, or Science'),
   body('display_name')
     .optional({ nullable: true })
     .trim()

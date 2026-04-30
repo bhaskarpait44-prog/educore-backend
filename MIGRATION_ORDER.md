@@ -78,6 +78,8 @@ schema chain is:
 59. `202604290004-create-fee-carry-forwards.js`
 60. `202604290005-create-collection-targets.js`
 61. `202604290006-add-advanced-finance-columns-to-fee-invoices.js`
+62. `202604300001-add-stream-to-enrollments.js`
+63. `202604300002-add-stream-to-classes.js`
 
 ## Legacy duplicate migrations
 

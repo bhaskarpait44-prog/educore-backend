@@ -1,5 +1,4 @@
 'use strict';
-const { Op }   = require('sequelize');
 const PDFDocument = require('pdfkit');
 const sequelize = require('../config/database');
 const { Class, Section, Subject } = require('../models');
@@ -51,6 +50,60 @@ function ensurePdfSpace(doc, neededHeight) {
   doc.addPage();
 }
 
+function normalizeStream(value, orderNumber) {
+  if (![11, 12].includes(Number(orderNumber))) return null;
+  return value ? String(value).trim().toLowerCase() : null;
+}
+
+function streamLabel(value) {
+  if (!value) return '';
+  return `${value.charAt(0).toUpperCase()}${value.slice(1)} Stream`;
+}
+
+async function findClassConflict({ schoolId, id = null, name, orderNumber, stream }) {
+  const replacements = {
+    schoolId,
+    id,
+    name: name || null,
+    orderNumber: orderNumber || null,
+    stream: stream || null,
+  };
+  const excludeCurrent = id ? 'AND id <> :id' : '';
+  const streamClause = stream ? 'stream = :stream' : 'stream IS NULL';
+
+  if (name) {
+    const [[conflict]] = await sequelize.query(`
+      SELECT id, name, order_number, stream
+      FROM classes
+      WHERE school_id = :schoolId
+        AND name = :name
+        AND ${streamClause}
+        AND COALESCE(is_deleted, false) = false
+        ${excludeCurrent}
+      LIMIT 1;
+    `, { replacements });
+
+    if (conflict) return { type: 'name', row: conflict };
+  }
+
+  if (orderNumber) {
+    const [[conflict]] = await sequelize.query(`
+      SELECT id, name, order_number, stream
+      FROM classes
+      WHERE school_id = :schoolId
+        AND order_number = :orderNumber
+        AND ${streamClause}
+        AND COALESCE(is_deleted, false) = false
+        ${excludeCurrent}
+      LIMIT 1;
+    `, { replacements });
+
+    if (conflict) return { type: 'order', row: conflict };
+  }
+
+  return null;
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // GET /api/classes
 // Returns all classes with counts per class
@@ -92,6 +145,7 @@ exports.list = async (req, res, next) => {
         c.id, c.name,
         ${hasDisplayName ? 'c.display_name' : 'NULL as display_name'},
         c.order_number,
+        ${columnNames.includes('stream') ? 'c.stream' : 'NULL as stream'},
         ${hasMinAge ? 'c.min_age' : 'NULL as min_age'},
         ${hasMaxAge ? 'c.max_age' : 'NULL as max_age'},
         ${hasDescription ? 'c.description' : 'NULL as description'},
@@ -139,18 +193,27 @@ exports.list = async (req, res, next) => {
 // ──────────────────────────────────────────────────────────────────────────
 exports.create = async (req, res, next) => {
   try {
-    const { name, display_name, order_number, min_age, max_age, description } = req.body;
+    const { name, display_name, order_number, stream, min_age, max_age, description } = req.body;
     const schoolId = req.user.school_id;
+    const normalizedStream = normalizeStream(stream, order_number);
 
-    // Check order_number uniqueness within school
-    const existing = await Class.findOne({ where: { school_id: schoolId, order_number } });
-    if (existing) {
-      return res.fail(`Order number ${order_number} is already used by class "${existing.name}".`, [], 409);
+    if ([11, 12].includes(Number(order_number)) && !normalizedStream) {
+      return res.fail('Stream is required for Class 11 and Class 12.', [], 422);
     }
 
-    const nameConflict = await Class.findOne({ where: { school_id: schoolId, name } });
-    if (nameConflict) {
-      return res.fail(`Class name "${name}" already exists.`, [], 409);
+    const conflict = await findClassConflict({
+      schoolId,
+      name,
+      orderNumber: order_number,
+      stream: normalizedStream,
+    });
+    if (conflict?.type === 'order') {
+      const suffix = normalizedStream ? ` (${streamLabel(normalizedStream)})` : '';
+      return res.fail(`Order number ${order_number}${suffix} is already used by class "${conflict.row.name}".`, [], 409);
+    }
+    if (conflict?.type === 'name') {
+      const suffix = normalizedStream ? ` for ${streamLabel(normalizedStream)}` : '';
+      return res.fail(`Class name "${name}" already exists${suffix}.`, [], 409);
     }
 
     const cls = await Class.create({
@@ -158,6 +221,7 @@ exports.create = async (req, res, next) => {
       name,
       display_name : display_name || null,
       order_number,
+      stream       : normalizedStream,
       min_age      : min_age || null,
       max_age      : max_age || null,
       description  : description || null,
@@ -171,6 +235,7 @@ exports.create = async (req, res, next) => {
       changes   : [
         { field: 'name',         oldValue: null, newValue: name },
         { field: 'order_number', oldValue: null, newValue: order_number },
+        { field: 'stream',       oldValue: null, newValue: normalizedStream },
         { field: 'is_active',    oldValue: null, newValue: true },
       ],
       reason: 'Class created',
@@ -246,21 +311,35 @@ exports.update = async (req, res, next) => {
     if (!cls) return res.fail('Class not found.', [], 404);
 
     // Check order_number conflict if changing
-    if (updateData.order_number && updateData.order_number !== cls.order_number) {
-      const conflict = await Class.findOne({
-        where: { school_id: schoolId, order_number: updateData.order_number, id: { [Op.ne]: id } },
-      });
-      if (conflict) return res.fail(`Order number ${updateData.order_number} already used by "${conflict.name}".`, [], 409);
+    const nextOrderNumber = updateData.order_number ?? cls.order_number;
+    const nextStream = normalizeStream(
+      Object.prototype.hasOwnProperty.call(updateData, 'stream') ? updateData.stream : cls.stream,
+      nextOrderNumber,
+    );
+
+    if ([11, 12].includes(Number(nextOrderNumber)) && !nextStream) {
+      return res.fail('Stream is required for Class 11 and Class 12.', [], 422);
     }
 
-    if (updateData.name && updateData.name !== cls.name) {
-      const conflict = await Class.findOne({
-        where: { school_id: schoolId, name: updateData.name, id: { [Op.ne]: id } },
-      });
-      if (conflict) return res.fail(`Class name "${updateData.name}" already exists.`, [], 409);
+    const conflict = await findClassConflict({
+      schoolId,
+      id,
+      name: updateData.name ?? cls.name,
+      orderNumber: nextOrderNumber,
+      stream: nextStream,
+    });
+    if (conflict?.type === 'order') {
+      const suffix = nextStream ? ` (${streamLabel(nextStream)})` : '';
+      return res.fail(`Order number ${nextOrderNumber}${suffix} already used by "${conflict.row.name}".`, [], 409);
+    }
+    if (conflict?.type === 'name') {
+      const suffix = nextStream ? ` for ${streamLabel(nextStream)}` : '';
+      return res.fail(`Class name "${updateData.name ?? cls.name}" already exists${suffix}.`, [], 409);
     }
 
-    const watchFields = ['name', 'display_name', 'order_number', 'min_age', 'max_age', 'description', 'is_active'];
+    updateData.stream = nextStream;
+
+    const watchFields = ['name', 'display_name', 'order_number', 'stream', 'min_age', 'max_age', 'description', 'is_active'];
     const changes     = diffFields(cls.toJSON(), updateData, watchFields);
 
     await cls.update({ ...updateData, updated_by: req.user.id });

@@ -8,6 +8,7 @@ const Class = sequelize.define('Class', {
   name         : { type: DataTypes.STRING(100), allowNull: false },
   display_name : { type: DataTypes.STRING(100), allowNull: true },
   order_number : { type: DataTypes.INTEGER, allowNull: false },
+  stream       : { type: DataTypes.STRING(20), allowNull: true },
   min_age      : { type: DataTypes.INTEGER, allowNull: true },
   max_age      : { type: DataTypes.INTEGER, allowNull: true },
   description  : { type: DataTypes.TEXT, allowNull: true },

@@ -99,7 +99,8 @@ function normalizePromotionOutcome(result) {
 // ── POST /api/enrollments ─────────────────────────────────────────────────────
 exports.enroll = async (req, res, next) => {
   try {
-    const { student_id, session_id, class_id, section_id, joining_type, joined_date, roll_number } = req.body;
+    const { student_id, session_id, class_id, section_id, stream, joining_type, joined_date, roll_number } = req.body;
+    const normalizedStream = stream ? String(stream).trim().toLowerCase() : null;
 
     // Check section capacity
     const [[capacityCheck]] = await sequelize.query(`
@@ -133,13 +134,13 @@ exports.enroll = async (req, res, next) => {
 
     const [[enrollment]] = await sequelize.query(`
       INSERT INTO enrollments
-        (student_id, session_id, class_id, section_id, roll_number, joined_date,
+        (student_id, session_id, class_id, section_id, stream, roll_number, joined_date,
          joining_type, left_date, leaving_type, previous_enrollment_id, status, created_at, updated_at)
       VALUES
-        (:student_id, :session_id, :class_id, :section_id, :roll_number, :joined_date,
+        (:student_id, :session_id, :class_id, :section_id, :stream, :roll_number, :joined_date,
          :joining_type, NULL, NULL, NULL, 'active', NOW(), NOW())
-      RETURNING id, student_id, session_id, class_id, section_id, roll_number, joining_type, status;
-    `, { replacements: { student_id, session_id, class_id, section_id, roll_number: finalRollNumber, joined_date, joining_type } });
+      RETURNING id, student_id, session_id, class_id, section_id, stream, roll_number, joining_type, status;
+    `, { replacements: { student_id, session_id, class_id, section_id, stream: normalizedStream, roll_number: finalRollNumber, joined_date, joining_type } });
 
     res.ok(enrollment, 'Student enrolled successfully.', 201);
   } catch (err) { next(err); }
@@ -295,6 +296,7 @@ exports.promotionCandidates = async (req, res, next) => {
         e.id AS enrollment_id,
         e.student_id,
         e.roll_number,
+        e.stream,
         e.section_id,
         sec.name AS section_name,
         s.admission_no,
@@ -342,6 +344,7 @@ exports.promotionCandidates = async (req, res, next) => {
         admission_no: row.admission_no,
         student_name: `${row.first_name} ${row.last_name || ''}`.trim(),
         roll_number: row.roll_number,
+        stream: row.stream,
         section_id: row.section_id,
         section_name: row.section_name,
         final_result: finalResult,
@@ -403,6 +406,7 @@ exports.processPromotions = async (req, res, next) => {
         e.student_id,
         e.class_id,
         e.section_id,
+        e.stream,
         e.roll_number,
         sec.name AS section_name,
         sr.result AS final_result,
@@ -506,10 +510,10 @@ exports.processPromotions = async (req, res, next) => {
 
         const [[createdEnrollment]] = await sequelize.query(`
           INSERT INTO enrollments
-            (student_id, session_id, class_id, section_id, roll_number, joined_date, joining_type,
+            (student_id, session_id, class_id, section_id, stream, roll_number, joined_date, joining_type,
              previous_enrollment_id, status, created_at, updated_at)
           VALUES
-            (:studentId, :targetSessionId, :targetClassId, :targetSectionId, :rollNumber, :today, :joiningType,
+            (:studentId, :targetSessionId, :targetClassId, :targetSectionId, :stream, :rollNumber, :today, :joiningType,
              :previousEnrollmentId, 'active', NOW(), NOW())
           RETURNING id;
         `, {
@@ -518,6 +522,7 @@ exports.processPromotions = async (req, res, next) => {
             targetSessionId: Number(target_session_id),
             targetClassId: targetClass.id,
             targetSectionId: targetSection.id,
+            stream: enrollment.stream,
             rollNumber,
             today,
             joiningType: passLike ? 'promoted' : 'failed',
@@ -581,7 +586,7 @@ exports.transfer = async (req, res, next) => {
     const today = new Date().toISOString().split('T')[0];
 
     const [[current]] = await sequelize.query(`
-      SELECT id, student_id, session_id, class_id FROM enrollments
+      SELECT id, student_id, session_id, class_id, stream FROM enrollments
       WHERE id = :enrollment_id AND status = 'active';
     `, { replacements: { enrollment_id } });
 
@@ -598,16 +603,17 @@ exports.transfer = async (req, res, next) => {
       // Open new in different section
       await sequelize.query(`
         INSERT INTO enrollments
-          (student_id, session_id, class_id, section_id, joined_date, joining_type,
+          (student_id, session_id, class_id, section_id, stream, joined_date, joining_type,
            previous_enrollment_id, status, created_at, updated_at)
         VALUES
-          (:student_id, :session_id, :class_id, :new_section_id, :today,
+          (:student_id, :session_id, :class_id, :new_section_id, :stream, :today,
            'transfer_in', :prev_id, 'active', NOW(), NOW());
       `, {
         replacements: {
           student_id: current.student_id,
           session_id: current.session_id,
           class_id  : current.class_id,
+          stream    : current.stream,
           new_section_id, today,
           prev_id   : enrollment_id,
         },

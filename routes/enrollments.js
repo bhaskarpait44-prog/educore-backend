@@ -11,6 +11,7 @@ router.post('/',          requireAdmin, [
   body('session_id').isInt(),
   body('class_id').isInt(),
   body('section_id').isInt(),
+  body('stream').optional({ nullable: true, checkFalsy: true }).isIn(['arts', 'commerce', 'science']),
   body('joining_type').isIn(['fresh', 'promoted', 'failed', 'transfer_in', 'rejoined']),
   body('joined_date').isDate(),
 ], validate, ctrl.enroll);

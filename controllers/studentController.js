@@ -92,6 +92,7 @@ exports.list = async (req, res, next) => {
         e.class_id,
         e.section_id,
         e.session_id,
+        e.stream,
         e.roll_number,
         e.joined_date,
         e.enrollment_status,
@@ -105,6 +106,7 @@ exports.list = async (req, res, next) => {
           en.class_id,
           en.section_id,
           en.session_id,
+          en.stream,
           en.roll_number,
           en.joined_date,
           en.status AS enrollment_status,
@@ -146,6 +148,7 @@ exports.list = async (req, res, next) => {
             class: student.class,
             section: student.section,
             session: student.session,
+            stream: student.stream,
             roll_number: student.roll_number,
             joined_date: student.joined_date,
             status: student.enrollment_status,
@@ -302,6 +305,7 @@ exports.getById = async (req, res, next) => {
         e.class_id,
         e.section_id,
         e.session_id,
+        e.stream,
         ${classLabelSelect} AS class,
         sec.name AS section,
         e.roll_number,
@@ -500,7 +504,7 @@ exports.getHistory = async (req, res, next) => {
       )
       SELECT c.id, c.depth, c.class_id, c.section_id, c.session_id,
              sess.name AS session, ${historyClassLabelSelect} AS class,
-             sec.name AS section, c.roll_number, c.joining_type,
+             sec.name AS section, c.stream, c.roll_number, c.joining_type,
              c.leaving_type, c.joined_date, c.left_date, c.status
       FROM chain c
       JOIN sessions sess ON sess.id = c.session_id

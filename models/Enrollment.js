@@ -9,6 +9,7 @@ const Enrollment = sequelize.define('Enrollment', {
   session_id             : { type: DataTypes.INTEGER, allowNull: false },
   class_id               : { type: DataTypes.INTEGER, allowNull: false },
   section_id             : { type: DataTypes.INTEGER, allowNull: false },
+  stream                 : { type: DataTypes.STRING(20), allowNull: true },
   roll_number            : { type: DataTypes.STRING(20), allowNull: true },
   joined_date            : { type: DataTypes.DATEONLY, allowNull: false },
   joining_type: {
