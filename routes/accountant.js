@@ -39,6 +39,7 @@ router.get('/receipt/:id/pdf', requirePermission('fees.view'), ctrl.getReceiptPd
 router.get('/fee-structure', requirePermission('fees.view'), ctrl.getFeeStructure);
 router.post('/fee-structure', requirePermission('fees.edit'), ctrl.createFeeStructure);
 router.patch('/fee-structure/:id', requirePermission('fees.edit'), ctrl.updateFeeStructure);
+router.delete('/fee-structure/:id', requirePermission('fees.edit'), ctrl.deleteFeeStructure);
 router.post('/fee-structure/generate-invoices', requirePermission('fees.edit'), ctrl.generateFeeInvoices);
 router.post('/fee-structure/copy-from-session', requirePermission('fees.edit'), ctrl.copyFeeStructureFromSession);
 

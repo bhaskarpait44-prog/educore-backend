@@ -10,6 +10,37 @@ function parseOptionalInteger(value) {
   return Number(normalized);
 }
 
+const TODAY = () => new Date().toISOString().slice(0, 10);
+
+async function getCurrentSessionForSchool(schoolId) {
+  const [[session]] = await sequelize.query(`
+    SELECT id, name, status, is_current
+    FROM sessions
+    WHERE school_id = :schoolId
+      AND is_current = true
+    LIMIT 1;
+  `, { replacements: { schoolId } });
+
+  return session || null;
+}
+
+async function resolveSessionId({ requestedSessionId, schoolId }) {
+  if (requestedSessionId != null) {
+    const [[session]] = await sequelize.query(`
+      SELECT id
+      FROM sessions
+      WHERE id = :sessionId
+        AND school_id = :schoolId
+      LIMIT 1;
+    `, { replacements: { sessionId: requestedSessionId, schoolId } });
+
+    return session?.id || null;
+  }
+
+  const session = await getCurrentSessionForSchool(schoolId);
+  return session?.id || null;
+}
+
 // ── POST /api/attendance/mark ─────────────────────────────────────────────────
 exports.markSingle = async (req, res, next) => {
   try {
@@ -88,6 +119,199 @@ exports.markBulk = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
+// ── GET /api/attendance/class ────────────────────────────────────────────────
+exports.getClassAttendance = async (req, res, next) => {
+  try {
+    const parsedSessionId = parseOptionalInteger(req.query.session_id);
+    const parsedClassId = parseOptionalInteger(req.query.class_id);
+    const parsedSectionId = parseOptionalInteger(req.query.section_id);
+    const date = req.query.date || TODAY();
+
+    if (parsedClassId == null) {
+      return res.fail('class_id must be a valid integer.', [], 422);
+    }
+
+    if (parsedSectionId == null) {
+      return res.fail('section_id must be a valid integer.', [], 422);
+    }
+
+    const sessionId = await resolveSessionId({
+      requestedSessionId: parsedSessionId,
+      schoolId: req.user.school_id,
+    });
+
+    if (sessionId == null) {
+      return res.fail('No active session found for this school.', [], 422);
+    }
+
+    const [students] = await sequelize.query(`
+      SELECT
+        e.id AS enrollment_id,
+        e.roll_number,
+        s.id AS student_id,
+        s.first_name,
+        s.last_name,
+        sp.photo_path,
+        a.id AS attendance_id,
+        a.status,
+        a.override_reason
+      FROM enrollments e
+      JOIN students s ON s.id = e.student_id
+      LEFT JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
+      LEFT JOIN attendance a ON a.enrollment_id = e.id AND a.date = :date
+      WHERE e.session_id = :sessionId
+        AND e.class_id = :classId
+        AND e.section_id = :sectionId
+        AND e.status = 'active'
+      ORDER BY
+        COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D', '', 'g'), ''), '999999')::integer,
+        e.roll_number,
+        s.first_name,
+        s.last_name;
+    `, {
+      replacements: {
+        date,
+        sessionId,
+        classId: parsedClassId,
+        sectionId: parsedSectionId,
+      },
+    });
+
+    const [[holiday]] = await sequelize.query(`
+      SELECT id, name
+      FROM session_holidays
+      WHERE session_id = :sessionId
+        AND holiday_date = :date
+      LIMIT 1;
+    `, { replacements: { sessionId, date } });
+
+    const alreadyMarked = students.some((student) => student.attendance_id);
+
+    res.ok({
+      session_id: sessionId,
+      class_id: parsedClassId,
+      section_id: parsedSectionId,
+      date,
+      is_holiday: !!holiday,
+      holiday,
+      already_marked: alreadyMarked,
+      students: students.map((student) => ({
+        ...student,
+        status: student.status || 'present',
+      })),
+    }, `${students.length} student(s) loaded for attendance.`);
+  } catch (err) { next(err); }
+};
+
+// ── GET /api/attendance/register ─────────────────────────────────────────────
+exports.getClassRegister = async (req, res, next) => {
+  try {
+    const parsedSessionId = parseOptionalInteger(req.query.session_id);
+    const parsedClassId = parseOptionalInteger(req.query.class_id);
+    const parsedSectionId = parseOptionalInteger(req.query.section_id);
+    const monthNum = Number(req.query.month);
+    const yearNum = Number(req.query.year);
+
+    if (parsedClassId == null) {
+      return res.fail('class_id must be a valid integer.', [], 422);
+    }
+
+    if (parsedSectionId == null) {
+      return res.fail('section_id must be a valid integer.', [], 422);
+    }
+
+    if (!Number.isInteger(monthNum) || monthNum < 1 || monthNum > 12) {
+      return res.fail('month must be between 1 and 12.', [], 422);
+    }
+
+    if (!Number.isInteger(yearNum) || yearNum < 2000 || yearNum > 2100) {
+      return res.fail('year must be a valid 4-digit year.', [], 422);
+    }
+
+    const sessionId = await resolveSessionId({
+      requestedSessionId: parsedSessionId,
+      schoolId: req.user.school_id,
+    });
+
+    if (sessionId == null) {
+      return res.fail('No active session found for this school.', [], 422);
+    }
+
+    const fromDate = `${yearNum}-${String(monthNum).padStart(2, '0')}-01`;
+    const lastDay = new Date(yearNum, monthNum, 0).getDate();
+    const toDate = `${yearNum}-${String(monthNum).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+
+    const [rows] = await sequelize.query(`
+      SELECT
+        e.id AS enrollment_id,
+        e.roll_number,
+        s.id AS student_id,
+        s.first_name,
+        s.last_name,
+        COALESCE(
+          JSON_AGG(
+            JSON_BUILD_OBJECT(
+              'id', a.id,
+              'attendance_id', a.id,
+              'date', a.date,
+              'status', a.status,
+              'reason', a.override_reason,
+              'override_reason', a.override_reason,
+              'method', a.method
+            )
+            ORDER BY a.date
+          ) FILTER (WHERE a.id IS NOT NULL),
+          '[]'::json
+        ) AS attendance,
+        ROUND(
+          (
+            (
+              COUNT(*) FILTER (WHERE a.status IN ('present', 'late'))
+              + COUNT(*) FILTER (WHERE a.status = 'half_day') * 0.5
+            )::numeric
+            / NULLIF((COUNT(*) FILTER (WHERE a.status != 'holiday'))::numeric, 0)
+          ) * 100,
+          2
+        ) AS percentage
+      FROM enrollments e
+      JOIN students s ON s.id = e.student_id
+      LEFT JOIN attendance a
+        ON a.enrollment_id = e.id
+       AND a.date BETWEEN :fromDate AND :toDate
+      WHERE e.session_id = :sessionId
+        AND e.class_id = :classId
+        AND e.section_id = :sectionId
+        AND e.status = 'active'
+      GROUP BY e.id, e.roll_number, s.id, s.first_name, s.last_name
+      ORDER BY
+        COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D', '', 'g'), ''), '999999')::integer,
+        e.roll_number,
+        s.first_name,
+        s.last_name;
+    `, {
+      replacements: {
+        fromDate,
+        toDate,
+        sessionId,
+        classId: parsedClassId,
+        sectionId: parsedSectionId,
+      },
+    });
+
+    res.ok({
+      session_id: sessionId,
+      class_id: parsedClassId,
+      section_id: parsedSectionId,
+      month: monthNum,
+      year: yearNum,
+      students: rows.map((row) => ({
+        ...row,
+        student_name: `${row.first_name || ''} ${row.last_name || ''}`.trim(),
+      })),
+    }, `${rows.length} student(s) found in attendance register.`);
+  } catch (err) { next(err); }
+};
+
 // ── GET /api/attendance/:enrollment_id ────────────────────────────────────────
 exports.getByEnrollment = async (req, res, next) => {
   try {
@@ -123,53 +347,72 @@ exports.sessionReport = async (req, res, next) => {
     }
 
     const [rows] = await sequelize.query(`
+      WITH attendance_records AS (
+        SELECT
+          a.enrollment_id,
+          COALESCE(
+            JSON_AGG(
+              JSON_BUILD_OBJECT(
+                'id', a.id,
+                'date', a.date,
+                'status', a.status,
+                'method', a.method,
+                'override_reason', a.override_reason
+              )
+              ORDER BY a.date
+            ),
+            '[]'::json
+          ) AS attendance
+        FROM attendance a
+        GROUP BY a.enrollment_id
+      ),
+      attendance_summary AS (
+        SELECT
+          a.enrollment_id,
+          COUNT(*) FILTER (WHERE a.status = 'present') AS present,
+          COUNT(*) FILTER (WHERE a.status = 'absent') AS absent,
+          COUNT(*) FILTER (WHERE a.status = 'late') AS late,
+          COUNT(*) FILTER (WHERE a.status = 'half_day') AS half_day,
+          COUNT(*) FILTER (WHERE a.status = 'holiday') AS holiday,
+          ROUND(
+            (
+              (
+                COUNT(*) FILTER (WHERE a.status IN ('present', 'late'))
+                + COUNT(*) FILTER (WHERE a.status = 'half_day') * 0.5
+              )::numeric
+              / NULLIF((COUNT(*) FILTER (WHERE a.status != 'holiday'))::numeric, 0)
+            ) * 100,
+            2
+          ) AS percentage
+        FROM attendance a
+        GROUP BY a.enrollment_id
+      )
       SELECT
         e.id AS enrollment_id,
         s.admission_no,
         s.first_name,
         s.last_name,
-        s.first_name || ' ' || s.last_name   AS student_name,
-        c.name   AS class,
+        s.first_name || ' ' || s.last_name AS student_name,
+        c.name AS class,
         sec.name AS section,
         e.roll_number,
-        COALESCE(
-          JSON_AGG(
-            JSON_BUILD_OBJECT(
-              'id', a.id,
-              'date', a.date,
-              'status', a.status,
-              'method', a.method,
-              'override_reason', a.override_reason
-            )
-            ORDER BY a.date
-          ) FILTER (WHERE a.id IS NOT NULL),
-          '[]'::json
-        ) AS attendance,
-        COUNT(*) FILTER (WHERE a.status = 'present')  AS present,
-        COUNT(*) FILTER (WHERE a.status = 'absent')   AS absent,
-        COUNT(*) FILTER (WHERE a.status = 'late')     AS late,
-        COUNT(*) FILTER (WHERE a.status = 'half_day') AS half_day,
-        COUNT(*) FILTER (WHERE a.status = 'holiday')  AS holiday,
-        ROUND(
-          (
-            (
-              COUNT(*) FILTER (WHERE a.status IN ('present','late'))
-              + COUNT(*) FILTER (WHERE a.status = 'half_day') * 0.5
-            )::numeric
-            / NULLIF((COUNT(*) FILTER (WHERE a.status != 'holiday'))::numeric, 0)
-          ) * 100,
-          2
-        ) AS percentage
+        COALESCE(ar.attendance, '[]'::json) AS attendance,
+        COALESCE(ats.present, 0) AS present,
+        COALESCE(ats.absent, 0) AS absent,
+        COALESCE(ats.late, 0) AS late,
+        COALESCE(ats.half_day, 0) AS half_day,
+        COALESCE(ats.holiday, 0) AS holiday,
+        COALESCE(ats.percentage, 0) AS percentage
       FROM enrollments e
-      JOIN students  s   ON s.id   = e.student_id
-      JOIN classes   c   ON c.id   = e.class_id
-      JOIN sections  sec ON sec.id = e.section_id
-      LEFT JOIN attendance a ON a.enrollment_id = e.id
+      JOIN students s ON s.id = e.student_id
+      JOIN classes c ON c.id = e.class_id
+      JOIN sections sec ON sec.id = e.section_id
+      LEFT JOIN attendance_records ar ON ar.enrollment_id = e.id
+      LEFT JOIN attendance_summary ats ON ats.enrollment_id = e.id
       WHERE e.session_id = :session_id
         AND e.status = 'active'
         AND (:class_id IS NULL OR e.class_id = :class_id)
         AND (:section_id IS NULL OR e.section_id = :section_id)
-      GROUP BY e.id, s.admission_no, s.first_name, s.last_name, c.name, sec.name, c.order_number
       ORDER BY
         c.order_number,
         sec.name,

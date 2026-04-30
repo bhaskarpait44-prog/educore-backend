@@ -3,6 +3,89 @@
 const sequelize  = require('../config/database');
 const feeManager = require('../utils/feeManager');
 
+async function syncStructureInvoicesForClass({ structure, transaction }) {
+  const [[session]] = await sequelize.query(`
+    SELECT id, start_date, end_date
+    FROM sessions
+    WHERE id = :sessionId
+    LIMIT 1;
+  `, {
+    replacements: { sessionId: structure.session_id },
+    transaction,
+  });
+
+  if (!session) return { created: 0, skipped: 0 };
+
+  const [enrollments] = await sequelize.query(`
+    SELECT id
+    FROM enrollments
+    WHERE session_id = :sessionId
+      AND class_id = :classId
+      AND status = 'active';
+  `, {
+    replacements: {
+      sessionId: structure.session_id,
+      classId: structure.class_id,
+    },
+    transaction,
+  });
+
+  const dueDates = feeManager._internal.buildDueDates(
+    session.start_date,
+    session.end_date,
+    structure.frequency,
+    structure.due_day,
+  );
+
+  let created = 0;
+  let skipped = 0;
+
+  for (const enrollment of enrollments) {
+    for (const { due_date } of dueDates) {
+      const [existing] = await sequelize.query(`
+        SELECT id
+        FROM fee_invoices
+        WHERE enrollment_id = :enrollmentId
+          AND fee_structure_id = :feeStructureId
+          AND due_date = :dueDate
+        LIMIT 1;
+      `, {
+        replacements: {
+          enrollmentId: enrollment.id,
+          feeStructureId: structure.id,
+          dueDate: due_date,
+        },
+        transaction,
+      });
+
+      if (existing.length > 0) {
+        skipped += 1;
+        continue;
+      }
+
+      await sequelize.getQueryInterface().bulkInsert('fee_invoices', [{
+        enrollment_id: enrollment.id,
+        fee_structure_id: structure.id,
+        amount_due: parseFloat(structure.amount).toFixed(2),
+        amount_paid: '0.00',
+        due_date,
+        paid_date: null,
+        status: 'pending',
+        carry_from_invoice_id: null,
+        late_fee_amount: '0.00',
+        concession_amount: '0.00',
+        concession_reason: null,
+        created_at: new Date(),
+        updated_at: new Date(),
+      }], { transaction });
+
+      created += 1;
+    }
+  }
+
+  return { created, skipped };
+}
+
 async function resolveSessionId(requestedSessionId, schoolId) {
   if (requestedSessionId) {
     const [[selectedSession]] = await sequelize.query(`
@@ -91,13 +174,37 @@ exports.createStructure = async (req, res, next) => {
 
     if (!session) return res.fail('No active session found. Activate a session first.');
 
-    const [[structure]] = await sequelize.query(`
-      INSERT INTO fee_structures (session_id, class_id, name, amount, frequency, due_day, is_active, created_at, updated_at)
-      VALUES (:session_id, :class_id, :name, :amount, :frequency, :due_day, true, NOW(), NOW())
-      RETURNING id, session_id, class_id, name, amount, frequency, due_day, is_active;
-    `, { replacements: { session_id: session.id, class_id, name, amount, frequency, due_day } });
+    const [[classRow]] = await sequelize.query(`
+      SELECT id
+      FROM classes
+      WHERE id = :classId
+        AND school_id = :schoolId
+        AND is_deleted = false
+      LIMIT 1;
+    `, {
+      replacements: {
+        classId: class_id,
+        schoolId: req.user.school_id,
+      },
+    });
 
-    res.ok(structure, 'Fee structure created.', 201);
+    if (!classRow) return res.fail('Selected class was not found for this school.', [], 404);
+
+    const payload = await sequelize.transaction(async (transaction) => {
+      const [[structure]] = await sequelize.query(`
+        INSERT INTO fee_structures (session_id, class_id, name, amount, frequency, due_day, is_active, created_at, updated_at)
+        VALUES (:session_id, :class_id, :name, :amount, :frequency, :due_day, true, NOW(), NOW())
+        RETURNING id, session_id, class_id, name, amount, frequency, due_day, is_active;
+      `, {
+        replacements: { session_id: session.id, class_id, name, amount, frequency, due_day },
+        transaction,
+      });
+
+      const invoice_sync = await syncStructureInvoicesForClass({ structure, transaction });
+      return { ...structure, invoice_sync };
+    });
+
+    res.ok(payload, 'Fee structure created.', 201);
   } catch (err) { next(err); }
 };
 
@@ -105,10 +212,21 @@ exports.deleteStructure = async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    await sequelize.query(
-      'DELETE FROM fee_structures WHERE id = :id',
-      { replacements: { id } }
-    );
+    const [[deleted]] = await sequelize.query(`
+      DELETE FROM fee_structures fs
+      USING classes c
+      WHERE fs.id = :id
+        AND c.id = fs.class_id
+        AND c.school_id = :schoolId
+      RETURNING fs.id;
+    `, {
+      replacements: {
+        id,
+        schoolId: req.user.school_id,
+      },
+    });
+
+    if (!deleted) return res.fail('Fee structure not found.', [], 404);
 
     res.ok({ id }, 'Fee structure deleted.');
   } catch (err) { next(err); }

@@ -6,6 +6,7 @@ const sequelize = require('../config/database');
 const { clearPermissionCache } = require('../middlewares/checkPermission');
 const profileVersioning = require('../utils/profileVersioning');
 const { normalizeUserRole } = require('../utils/roles');
+const { DEFAULT_ROLE_PERMISSIONS } = require('../utils/permissionConstants');
 
 const ADMIN_ROLES = ['admin'];
 const MANAGEABLE_USER_ROLES = ['admin', 'teacher', 'accountant', 'student', 'parent', 'staff', 'librarian', 'receptionist'];
@@ -39,7 +40,8 @@ function resolvePermissionNamesForRole(role, permissionNames = []) {
   const normalized = Array.isArray(permissionNames)
     ? permissionNames.filter(Boolean).map((name) => String(name).trim())
     : [];
-  return [...new Set(normalized)];
+  const defaults = DEFAULT_ROLE_PERMISSIONS[role] || [];
+  return [...new Set(normalized.length > 0 ? [...defaults, ...normalized] : defaults)];
 }
 
 async function ensurePermissionsExist(permissionDefs, transaction) {

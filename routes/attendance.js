@@ -22,6 +22,8 @@ router.post('/bulk',    requireAdminOrTeacher, [
   body('records.*.status').isIn(['present', 'absent', 'late', 'half_day', 'holiday']),
 ], validate, ctrl.markBulk);
 
+router.get('/class', requireAdminOrTeacher, ctrl.getClassAttendance);
+router.get('/register', requireAdminOrTeacher, ctrl.getClassRegister);
 router.get('/report/:session_id', requireAdminOrTeacher, ctrl.sessionReport);
 router.get('/:enrollment_id',     requireAdminOrTeacher, ctrl.getByEnrollment);
 

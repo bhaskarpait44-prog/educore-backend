@@ -1,6 +1,6 @@
 'use strict';
 const sequelize = require('../config/database');
-const { ADMIN_ROLES } = require('../utils/permissionConstants');
+const { ADMIN_ROLES, DEFAULT_ROLE_PERMISSIONS } = require('../utils/permissionConstants');
 
 /**
  * Permission cache: user_id → Set of permission names
@@ -23,6 +23,8 @@ async function loadUserPermissions(userId, userRole = null) {
   `, { replacements: { userId } });
 
   const perms = new Set(rows.map(r => r.name));
+  const defaults = DEFAULT_ROLE_PERMISSIONS[userRole] || [];
+  defaults.forEach((permission) => perms.add(permission));
   permCache.set(userId, { perms, expiry: Date.now() + CACHE_TTL });
   return perms;
 }

@@ -106,7 +106,7 @@ async function getReceiptPayload(paymentId, schoolId) {
       fs.name AS fee_name,
       s.id AS student_id,
       s.admission_no,
-      s.roll_no,
+      e.roll_number AS roll_no,
       s.first_name || ' ' || s.last_name AS student_name,
       c.name AS class_name,
       sec.name AS section_name,
@@ -132,7 +132,7 @@ async function getStudentFinanceSummary(studentId, sessionId, schoolId) {
     SELECT
       s.id,
       s.admission_no,
-      s.roll_no,
+      e.roll_number AS roll_no,
       s.first_name,
       s.last_name,
       e.id AS enrollment_id,
@@ -473,7 +473,7 @@ exports.searchStudents = async (req, res, next) => {
       SELECT
         s.id,
         s.admission_no,
-        s.roll_no,
+        e.roll_number AS roll_no,
         s.first_name,
         s.last_name,
         e.id AS enrollment_id,
@@ -492,7 +492,7 @@ exports.searchStudents = async (req, res, next) => {
           s.admission_no ILIKE :query
           OR CONCAT(s.first_name, ' ', s.last_name) ILIKE :query
         )
-      GROUP BY s.id, e.id, c.name, sec.name
+      GROUP BY s.id, e.id, e.roll_number, c.name, sec.name
       ORDER BY pending_amount DESC, s.first_name
       LIMIT 12;
     `, {
@@ -729,7 +729,7 @@ exports.getStudents = async (req, res, next) => {
       SELECT
         s.id,
         s.admission_no,
-        s.roll_no,
+        e.roll_number AS roll_no,
         s.first_name || ' ' || s.last_name AS student_name,
         c.name AS class_name,
         sec.name AS section_name,
@@ -757,7 +757,7 @@ exports.getStudents = async (req, res, next) => {
           OR s.admission_no ILIKE :search
           OR CONCAT(s.first_name, ' ', s.last_name) ILIKE :search
         )
-      GROUP BY s.id, c.name, sec.name
+      GROUP BY s.id, e.roll_number, c.name, sec.name
       HAVING (
         :status = ''
         OR (
@@ -839,6 +839,7 @@ exports.getStudentStatementPdf = async (req, res, next) => {
 
 exports.getFeeStructure = feeController.getStructures;
 exports.createFeeStructure = feeController.createStructure;
+exports.deleteFeeStructure = feeController.deleteStructure;
 exports.generateFeeInvoices = feeController.generate;
 
 exports.updateFeeStructure = async (req, res, next) => {
