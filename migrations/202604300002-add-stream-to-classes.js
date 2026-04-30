@@ -8,7 +8,7 @@ module.exports = {
       await queryInterface.addColumn('classes', 'stream', {
         type      : Sequelize.STRING(20),
         allowNull : true,
-        comment   : 'Optional stream for senior classes: arts, commerce, or science.',
+        comment   : 'Academic stream: regular, arts, commerce, or science.',
       });
     }
 
@@ -20,7 +20,7 @@ module.exports = {
       ADD CONSTRAINT chk_classes_stream
       CHECK (
         stream IS NULL
-        OR stream IN ('arts', 'commerce', 'science')
+        OR stream IN ('regular', 'arts', 'commerce', 'science')
       );
 
       DROP INDEX IF EXISTS idx_classes_school_name;

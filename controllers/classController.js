@@ -50,14 +50,15 @@ function ensurePdfSpace(doc, neededHeight) {
   doc.addPage();
 }
 
-function normalizeStream(value, orderNumber) {
-  if (![11, 12].includes(Number(orderNumber))) return null;
-  return value ? String(value).trim().toLowerCase() : null;
+function normalizeStream(value) {
+  const normalized = value ? String(value).trim().toLowerCase() : '';
+  return normalized || 'regular';
 }
 
 function streamLabel(value) {
   if (!value) return '';
-  return `${value.charAt(0).toUpperCase()}${value.slice(1)} Stream`;
+  const label = `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
+  return value === 'regular' ? label : `${label} Stream`;
 }
 
 async function findClassConflict({ schoolId, id = null, name, orderNumber, stream }) {
@@ -69,7 +70,9 @@ async function findClassConflict({ schoolId, id = null, name, orderNumber, strea
     stream: stream || null,
   };
   const excludeCurrent = id ? 'AND id <> :id' : '';
-  const streamClause = stream ? 'stream = :stream' : 'stream IS NULL';
+  const streamClause = stream === 'regular'
+    ? "(stream = 'regular' OR stream IS NULL)"
+    : stream ? 'stream = :stream' : 'stream IS NULL';
 
   if (name) {
     const [[conflict]] = await sequelize.query(`
@@ -195,11 +198,7 @@ exports.create = async (req, res, next) => {
   try {
     const { name, display_name, order_number, stream, min_age, max_age, description } = req.body;
     const schoolId = req.user.school_id;
-    const normalizedStream = normalizeStream(stream, order_number);
-
-    if ([11, 12].includes(Number(order_number)) && !normalizedStream) {
-      return res.fail('Stream is required for Class 11 and Class 12.', [], 422);
-    }
+    const normalizedStream = normalizeStream(stream);
 
     const conflict = await findClassConflict({
       schoolId,
@@ -314,12 +313,7 @@ exports.update = async (req, res, next) => {
     const nextOrderNumber = updateData.order_number ?? cls.order_number;
     const nextStream = normalizeStream(
       Object.prototype.hasOwnProperty.call(updateData, 'stream') ? updateData.stream : cls.stream,
-      nextOrderNumber,
     );
-
-    if ([11, 12].includes(Number(nextOrderNumber)) && !nextStream) {
-      return res.fail('Stream is required for Class 11 and Class 12.', [], 422);
-    }
 
     const conflict = await findClassConflict({
       schoolId,

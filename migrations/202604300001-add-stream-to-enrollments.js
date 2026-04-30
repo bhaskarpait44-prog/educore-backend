@@ -5,7 +5,7 @@ module.exports = {
     await queryInterface.addColumn('enrollments', 'stream', {
       type      : Sequelize.STRING(20),
       allowNull : true,
-      comment   : 'Optional academic stream such as arts, commerce, or science.',
+      comment   : 'Optional academic stream such as regular, arts, commerce, or science.',
     });
 
     await queryInterface.sequelize.query(`
@@ -13,7 +13,7 @@ module.exports = {
       ADD CONSTRAINT chk_enrollments_stream
       CHECK (
         stream IS NULL
-        OR stream IN ('arts', 'commerce', 'science')
+        OR stream IN ('regular', 'arts', 'commerce', 'science')
       );
     `);
   },

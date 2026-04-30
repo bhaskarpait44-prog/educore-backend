@@ -100,7 +100,7 @@ function normalizePromotionOutcome(result) {
 exports.enroll = async (req, res, next) => {
   try {
     const { student_id, session_id, class_id, section_id, stream, joining_type, joined_date, roll_number } = req.body;
-    const normalizedStream = stream ? String(stream).trim().toLowerCase() : null;
+    const normalizedStream = stream ? String(stream).trim().toLowerCase() : 'regular';
 
     // Check section capacity
     const [[capacityCheck]] = await sequelize.query(`
