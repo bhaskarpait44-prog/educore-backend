@@ -6,7 +6,7 @@
 
   "scripts": {
     "start": "node server.js",
-    "start:prod": "npx sequelize-cli db:migrate --config config/sequelize-config.js && node server.js",
+    "start:prod": "npx sequelize-cli db:seed:all --config config/sequelize-config.js && node server.js",
     "dev": "nodemon server.js",
 
     "db:test": "node -e \"require('./config/database').authenticate().then(() => { console.log('✅ DB connected'); process.exit(0); }).catch(e => { console.error('❌', e.message); process.exit(1); })\"",
