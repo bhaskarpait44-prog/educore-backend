@@ -69,7 +69,7 @@ module.exports = {
 
       // ── School-specific ─────────────────────────────────────────────
       { date: '2026-11-14', name: 'Children\'s Day',           type: 'school'    },
-      { date: '2026-12-24', name: 'Christmas Eve (School)',     type: 'school'    },
+      { date: '2026-12-24', name: 'Christmas Day (School)',     type: 'school'    },
       { date: '2026-12-26', name: 'Winter Break Begins',        type: 'school'    },
       { date: '2026-12-27', name: 'Winter Break',               type: 'school'    },
       { date: '2026-12-28', name: 'Winter Break',               type: 'school'    },
