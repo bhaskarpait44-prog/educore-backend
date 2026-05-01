@@ -10,7 +10,7 @@ module.exports = {
     );
 
     if (!classes.length) {
-      console.warn('No classes found — run class seed first.');
+      console.warn('No classes founds — run class seed first.');
       return;
     }
 
