@@ -329,14 +329,28 @@ exports.getById = async (req, res, next) => {
 exports.updateIdentity = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { first_name, last_name, date_of_birth, gender, reason } = req.body;
+    const { admission_no, first_name, last_name, date_of_birth, gender, reason } = req.body;
 
     const [[student]] = await sequelize.query(`
-      SELECT id, first_name, last_name, date_of_birth, gender
+      SELECT id, admission_no, first_name, last_name, date_of_birth, gender
       FROM students WHERE id = :id AND school_id = :schoolId AND is_deleted = false;
     `, { replacements: { id, schoolId: req.user.school_id } });
 
     if (!student) return res.fail('Student not found.', [], 404);
+
+    if (admission_no && admission_no !== student.admission_no) {
+      const [[existing]] = await sequelize.query(`
+        SELECT id FROM students
+        WHERE school_id = :schoolId
+          AND admission_no = :admission_no
+          AND id <> :id
+        LIMIT 1;
+      `, { replacements: { schoolId: req.user.school_id, admission_no, id } });
+
+      if (existing) {
+        return res.fail('Admission number already exists for this school.', [], 409);
+      }
+    }
 
     // Set audit context — trigger reads these for each field change
     await auditLogger.setContext(sequelize, {
@@ -347,6 +361,7 @@ exports.updateIdentity = async (req, res, next) => {
     });
 
     const updates = {};
+    if (admission_no)  updates.admission_no  = admission_no;
     if (first_name)    updates.first_name    = first_name;
     if (last_name)     updates.last_name     = last_name;
     if (date_of_birth) updates.date_of_birth = date_of_birth;
@@ -360,7 +375,7 @@ exports.updateIdentity = async (req, res, next) => {
     const [[updated]] = await sequelize.query(`
       UPDATE students SET ${setClauses}, updated_at = NOW()
       WHERE id = :id
-      RETURNING id, first_name, last_name, date_of_birth, gender;
+      RETURNING id, admission_no, first_name, last_name, date_of_birth, gender;
     `, { replacements: { ...updates, id } });
 
     res.ok(updated, 'Student identity updated. Audit log written.');

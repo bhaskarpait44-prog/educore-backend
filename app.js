@@ -28,7 +28,13 @@ const corsOrigins = (() => {
     .filter(Boolean);
 
   // Include common local dev origins by default.
-  ['http://localhost:3000', 'http://localhost:5173'].forEach((origin) => {
+    [
+    'http://localhost',
+    'http://localhost:3000',
+    'http://localhost:5173',
+    'http://127.0.0.1',
+    'http://127.0.0.1:3000',
+  ].forEach((origin) => {
     if (!allowed.includes(origin)) allowed.push(origin);
   });
 

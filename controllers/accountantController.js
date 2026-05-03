@@ -226,6 +226,60 @@ async function getStudentFinanceSummary(studentId, sessionId, schoolId) {
   };
 }
 
+async function createFeeNotice(req, {
+  title,
+  content,
+  targetScope,
+  classId = null,
+  targetStudentId = null,
+  expiryDate = null,
+}) {
+  const [[notice]] = await sequelize.query(`
+    INSERT INTO teacher_notices (
+      teacher_id, class_id, section_id, target_student_id,
+      title, content, category, target_scope,
+      publish_date, expiry_date, is_active, created_at, updated_at
+    )
+    VALUES (
+      :userId, :classId, NULL, :targetStudentId,
+      :title, :content, 'fee', :targetScope,
+      NOW(), :expiryDate, true, NOW(), NOW()
+    )
+    RETURNING *;
+  `, {
+    replacements: {
+      userId: req.user.id,
+      classId,
+      targetStudentId,
+      title,
+      content,
+      targetScope,
+      expiryDate,
+    },
+  });
+
+  await writeFinancialAudit(req, 'teacher_notices', notice.id, 'created', title, 'Accountant fee notice created');
+  return notice;
+}
+
+async function ensureClassBelongsToSchool(classId, schoolId) {
+  const [[row]] = await sequelize.query(`
+    SELECT id FROM classes
+    WHERE id = :classId AND school_id = :schoolId AND COALESCE(is_deleted, false) = false
+    LIMIT 1;
+  `, { replacements: { classId, schoolId } });
+  return row || null;
+}
+
+async function ensureStudentBelongsToSchool(studentId, schoolId) {
+  const [[row]] = await sequelize.query(`
+    SELECT id FROM students
+    WHERE id = :studentId AND school_id = :schoolId AND is_deleted = false
+    LIMIT 1;
+  `, { replacements: { studentId, schoolId } });
+  return row || null;
+}
+
 exports.getDashboard = feeController.getDashboard;
 
 exports.getTodayStats = async (req, res, next) => {
@@ -972,6 +1026,7 @@ exports.sendDefaulterReminder = async (req, res, next) => {
     if (!Array.isArray(student_ids) || student_ids.length === 0) {
       return res.fail('student_ids is required.', [], 422);
     }
+    const noticeMessage = message || 'Fee reminder: your fee payment is pending. Please clear the outstanding dues as soon as possible.';
 
     const rows = student_ids.map((studentId) => ({
       school_id: req.user.school_id,
@@ -979,7 +1034,7 @@ exports.sendDefaulterReminder = async (req, res, next) => {
       invoice_id: null,
       reminder_type: type,
       contact_channel: type,
-      message,
+      message: noticeMessage,
       sent_by: req.user.id,
       sent_at: new Date(),
       status: 'sent',
@@ -988,11 +1043,91 @@ exports.sendDefaulterReminder = async (req, res, next) => {
     }));
 
     await sequelize.getQueryInterface().bulkInsert('fee_reminders', rows).catch(() => {});
-    res.ok({ sent: student_ids.length, type }, 'Reminders sent.');
+    const notices = [];
+    for (const studentId of student_ids) {
+      const student = await ensureStudentBelongsToSchool(studentId, req.user.school_id);
+      if (!student) continue;
+      notices.push(await createFeeNotice(req, {
+        title: 'Fee Payment Reminder',
+        content: noticeMessage,
+        targetScope: 'specific_student',
+        targetStudentId: Number(studentId),
+      }));
+    }
+    res.ok({ sent: student_ids.length, notices_created: notices.length, type }, 'Reminders sent.');
   } catch (err) { next(err); }
 };
 
 exports.sendBulkDefaulterReminder = exports.sendDefaulterReminder;
+
+exports.getNotices = async (req, res, next) => {
+  try {
+    const [rows] = await sequelize.query(`
+      SELECT
+        n.*,
+        c.name AS class_name,
+        s.first_name || ' ' || s.last_name AS target_student_name,
+        COUNT(snr.id)::int AS student_read_count
+      FROM teacher_notices n
+      LEFT JOIN classes c ON c.id = n.class_id
+      LEFT JOIN students s ON s.id = n.target_student_id
+      LEFT JOIN student_notice_reads snr ON snr.notice_id = n.id
+      WHERE n.teacher_id = :userId
+        AND n.category = 'fee'
+      GROUP BY n.id, c.name, s.first_name, s.last_name
+      ORDER BY n.publish_date DESC;
+    `, { replacements: { userId: req.user.id } });
+    res.ok({ notices: rows }, `${rows.length} notice(s) found.`);
+  } catch (err) { next(err); }
+};
+
+exports.createNotice = async (req, res, next) => {
+  try {
+    const {
+      title,
+      content,
+      audience,
+      class_id = null,
+      student_id = null,
+      expiry_date = null,
+    } = req.body || {};
+
+    if (!title || !content || !audience) return res.fail('title, content and audience are required.', [], 422);
+
+    let targetScope = 'all_students';
+    let classId = null;
+    let targetStudentId = null;
+
+    if (audience === 'all_classes') {
+      targetScope = 'all_students';
+    } else if (audience === 'class') {
+      if (!class_id) return res.fail('class_id is required for class wise notice.', [], 422);
+      const klass = await ensureClassBelongsToSchool(Number(class_id), req.user.school_id);
+      if (!klass) return res.fail('Class not found.', [], 404);
+      targetScope = 'specific_section';
+      classId = Number(class_id);
+    } else if (audience === 'student') {
+      if (!student_id) return res.fail('student_id is required for student notice.', [], 422);
+      const student = await ensureStudentBelongsToSchool(Number(student_id), req.user.school_id);
+      if (!student) return res.fail('Student not found.', [], 404);
+      targetScope = 'specific_student';
+      targetStudentId = Number(student_id);
+    } else {
+      return res.fail('audience must be all_classes, class, or student.', [], 422);
+    }
+
+    const notice = await createFeeNotice(req, {
+      title,
+      content,
+      targetScope,
+      classId,
+      targetStudentId,
+      expiryDate: expiry_date || null,
+    });
+
+    res.ok({ notice }, 'Fee notice created.', 201);
+  } catch (err) { next(err); }
+};
 
 exports.getConcessions = async (req, res, next) => {
   try {

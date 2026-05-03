@@ -515,7 +515,7 @@ async function ensureHomeworkPendingRows(homeworkId, homework) {
 
 function validateNoticePayload(payload, { partial = false } = {}) {
   const allowedCategories = new Set(['general', 'homework', 'exam', 'event', 'holiday', 'other']);
-  const allowedScopes = new Set(['my_class_only', 'specific_section']);
+  const allowedScopes = new Set(['my_class_only', 'specific_section', 'specific_student']);
 
   if (!partial) {
     requireFields(payload, ['title', 'content', 'target_scope']);
@@ -528,7 +528,7 @@ function validateNoticePayload(payload, { partial = false } = {}) {
   }
 
   if (payload.target_scope != null && !allowedScopes.has(payload.target_scope)) {
-    const error = new Error('Teachers can only target my_class_only or specific_section notices.');
+    const error = new Error('Teachers can only target assigned class, assigned section, or accessible students.');
     error.status = 422;
     throw error;
   }
@@ -567,6 +567,7 @@ async function getAccessibleNoticeForTeacher(noticeId, req, scope) {
       AND (
         n.teacher_id = :teacherId
         OR n.target_scope = 'teachers'
+        OR (n.target_scope = 'specific_teacher' AND n.target_teacher_id = :teacherId)
         OR (n.target_scope = 'my_class_only' AND (n.class_id, n.section_id) IN (${tupleClause}))
         OR (n.target_scope = 'specific_section' AND n.section_id IN (:sectionIds))
       )
@@ -2774,6 +2775,7 @@ exports.noticeList = async (req, res, next) => {
         AND (:mineOnly = false OR n.teacher_id = :teacherId)
         AND (
           n.target_scope = 'teachers'
+          OR (n.target_scope = 'specific_teacher' AND n.target_teacher_id = :teacherId)
           OR (n.target_scope = 'my_class_only' AND (n.class_id, n.section_id) IN (${classTeacherPairs.map((_, i) => `(:classId${i}, :sectionId${i})`).join(', ') || '(NULL, NULL)'}))
           OR (n.target_scope = 'specific_section' AND n.section_id IN (:sectionIds))
           OR n.teacher_id = :teacherId
@@ -2801,7 +2803,18 @@ exports.noticeList = async (req, res, next) => {
 
 exports.createNotice = async (req, res, next) => {
   try {
-    const { title, content, category = 'general', target_scope, class_id = null, section_id = null, attachment_path = null, publish_date = new Date(), expiry_date = null } = req.body;
+    const {
+      title,
+      content,
+      category = 'general',
+      target_scope,
+      class_id = null,
+      section_id = null,
+      target_student_id = null,
+      attachment_path = null,
+      publish_date = new Date(),
+      expiry_date = null,
+    } = req.body;
     validateNoticePayload({ ...req.body, category, publish_date, expiry_date });
 
     const { scope } = await getTeacherContext(req);
@@ -2815,14 +2828,18 @@ exports.createNotice = async (req, res, next) => {
       requireFields({ class_id, section_id }, ['class_id', 'section_id']);
       assertAccess(scope, Number(class_id), Number(section_id));
     }
+    if (target_scope === 'specific_student') {
+      requireFields({ target_student_id }, ['target_student_id']);
+      await getAccessibleStudent(scope, req.user.school_id, Number(target_student_id));
+    }
 
     const [[notice]] = await sequelize.query(`
       INSERT INTO teacher_notices (
-        teacher_id, class_id, section_id, title, content, category, target_scope,
+        teacher_id, class_id, section_id, target_student_id, title, content, category, target_scope,
         attachment_path, publish_date, expiry_date, is_active, created_at, updated_at
       )
       VALUES (
-        :teacherId, :classId, :sectionId, :title, :content, :category, :targetScope,
+        :teacherId, :classId, :sectionId, :targetStudentId, :title, :content, :category, :targetScope,
         :attachmentPath, :publishDate, :expiryDate, true, NOW(), NOW()
       )
       RETURNING *;
@@ -2831,6 +2848,7 @@ exports.createNotice = async (req, res, next) => {
         teacherId: req.user.id,
         classId: class_id,
         sectionId: section_id,
+        targetStudentId: target_student_id,
         title,
         content,
         category,

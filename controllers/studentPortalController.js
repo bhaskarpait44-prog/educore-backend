@@ -571,13 +571,16 @@ async function ensureOwnedNotice(req, context, noticeId) {
     WHERE id = :noticeId
       AND is_active = true
       AND (
-        (target_scope = 'my_class_only' AND class_id = :classId AND section_id = :sectionId)
-        OR (target_scope = 'specific_section' AND class_id = :classId AND section_id = :sectionId)
+        target_scope = 'all_students'
+        OR (target_scope = 'specific_student' AND target_student_id = :studentId)
+        OR (target_scope = 'my_class_only' AND class_id = :classId AND section_id = :sectionId)
+        OR (target_scope = 'specific_section' AND class_id = :classId AND (section_id IS NULL OR section_id = :sectionId))
       )
     LIMIT 1;
   `, {
     replacements: {
       noticeId,
+      studentId: context.studentId,
       classId: context.classId,
       sectionId: context.sectionId,
     },
@@ -1512,8 +1515,10 @@ exports.noticeList = async (req, res, next) => {
         AND (n.expiry_date IS NULL OR n.expiry_date >= NOW())
         AND (:category::text IS NULL OR n.category = :category)
         AND (
-          (n.target_scope = 'my_class_only' AND n.class_id = :classId AND n.section_id = :sectionId)
-          OR (n.target_scope = 'specific_section' AND n.class_id = :classId AND n.section_id = :sectionId)
+          n.target_scope = 'all_students'
+          OR (n.target_scope = 'specific_student' AND n.target_student_id = :studentId)
+          OR (n.target_scope = 'my_class_only' AND n.class_id = :classId AND n.section_id = :sectionId)
+          OR (n.target_scope = 'specific_section' AND n.class_id = :classId AND (n.section_id IS NULL OR n.section_id = :sectionId))
         )
       ORDER BY
         COALESCE(np.pinned_at IS NOT NULL, false) DESC,

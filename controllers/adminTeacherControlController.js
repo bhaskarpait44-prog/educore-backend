@@ -568,19 +568,99 @@ exports.notices = async (req, res, next) => {
       SELECT
         n.*,
         u.name AS teacher_name,
+        tu.name AS target_teacher_name,
+        CONCAT(ts.first_name, ' ', ts.last_name) AS target_student_name,
         c.name AS class_name,
         sec.name AS section_name,
-        COUNT(nr.id) AS read_count
+        COUNT(DISTINCT nr.id) AS teacher_read_count,
+        COUNT(DISTINCT snr.id) AS student_read_count
       FROM teacher_notices n
       JOIN users u ON u.id = n.teacher_id
+      LEFT JOIN users tu ON tu.id = n.target_teacher_id
+      LEFT JOIN students ts ON ts.id = n.target_student_id
       LEFT JOIN classes c ON c.id = n.class_id
       LEFT JOIN sections sec ON sec.id = n.section_id
       LEFT JOIN teacher_notice_reads nr ON nr.notice_id = n.id
-      GROUP BY n.id, u.name, c.name, sec.name
+      LEFT JOIN student_notice_reads snr ON snr.notice_id = n.id
+      GROUP BY n.id, u.name, tu.name, ts.first_name, ts.last_name, c.name, sec.name
       ORDER BY n.publish_date DESC;
     `);
 
     res.ok({ notices: rows }, `${rows.length} notice(s) found.`);
+  } catch (err) { next(err); }
+};
+
+exports.createNotice = async (req, res, next) => {
+  try {
+    const {
+      title,
+      content,
+      category = 'general',
+      target_scope,
+      class_id = null,
+      section_id = null,
+      target_student_id = null,
+      target_teacher_id = null,
+      attachment_path = null,
+      publish_date = new Date(),
+      expiry_date = null,
+    } = req.body;
+
+    const allowedCategories = new Set(['general', 'homework', 'exam', 'event', 'holiday', 'other']);
+    const allowedScopes = new Set(['teachers', 'all_students', 'specific_section', 'specific_student', 'specific_teacher']);
+    if (!title || !content || !target_scope) return res.fail('title, content and target_scope are required.', [], 422);
+    if (!allowedCategories.has(category)) return res.fail('category is invalid.', [], 422);
+    if (!allowedScopes.has(target_scope)) return res.fail('target_scope is invalid.', [], 422);
+    if (expiry_date && publish_date && new Date(expiry_date) < new Date(publish_date)) {
+      return res.fail('expiry_date cannot be earlier than publish_date.', [], 422);
+    }
+    if (target_scope === 'specific_section' && !class_id) {
+      return res.fail('class_id is required for class or section notices.', [], 422);
+    }
+    if (target_scope === 'specific_student' && !target_student_id) {
+      return res.fail('target_student_id is required for student-wise notices.', [], 422);
+    }
+    if (target_scope === 'specific_teacher' && !target_teacher_id) {
+      return res.fail('target_teacher_id is required for teacher-wise notices.', [], 422);
+    }
+
+    const [[notice]] = await sequelize.query(`
+      INSERT INTO teacher_notices (
+        teacher_id, class_id, section_id, target_student_id, target_teacher_id,
+        title, content, category, target_scope, attachment_path,
+        publish_date, expiry_date, is_active, created_at, updated_at
+      )
+      VALUES (
+        :postedBy, :classId, :sectionId, :targetStudentId, :targetTeacherId,
+        :title, :content, :category, :targetScope, :attachmentPath,
+        :publishDate, :expiryDate, true, NOW(), NOW()
+      )
+      RETURNING *;
+    `, {
+      replacements: {
+        postedBy: req.user.id,
+        classId: class_id,
+        sectionId: section_id,
+        targetStudentId: target_student_id,
+        targetTeacherId: target_teacher_id,
+        title,
+        content,
+        category,
+        targetScope: target_scope,
+        attachmentPath: attachment_path,
+        publishDate: publish_date,
+        expiryDate: expiry_date,
+      },
+    });
+
+    await audit('teacher_notices', notice.id, {
+      field: 'created',
+      oldValue: null,
+      newValue: title,
+      reason: 'Admin notice posted',
+    }, req);
+
+    res.ok({ notice }, 'Notice posted successfully.', 201);
   } catch (err) { next(err); }
 };
 

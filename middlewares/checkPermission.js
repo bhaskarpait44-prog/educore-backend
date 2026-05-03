@@ -78,6 +78,9 @@ function requirePermission(permission) {
         if (user.role === 'teacher' && permission === 'classes.view' && await teacherHasActiveAssignment(user.id)) {
           return next();
         }
+        if (user.role === 'teacher' && permission === 'notices.post' && await teacherHasActiveAssignment(user.id)) {
+          return next();
+        }
 
         return res.status(403).json({
           success : false,
