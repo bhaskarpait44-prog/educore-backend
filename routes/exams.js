@@ -7,8 +7,19 @@ const validate = require('../middlewares/validate');
 const { requireAdmin, requireAdminOrTeacher } = require('../middlewares/auth');
 const ctrl     = require('../controllers/examController');
 
+const multer = require('multer');
+const upload = multer({ storage: multer.memoryStorage() });
+
 // GET /api/exams - List exams
 router.get('/', requireAdminOrTeacher, ctrl.list);
+
+router.get('/:id/subjects/:subjectId/template', requireAdminOrTeacher, ctrl.getTemplate);
+
+router.post('/:id/subjects/:subjectId/upload-marks', 
+  requireAdminOrTeacher, 
+  upload.single('file'), 
+  ctrl.uploadMarks
+);
 
 // POST /api/exams - Create exam
 router.post('/', requireAdmin, [

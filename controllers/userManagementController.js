@@ -513,7 +513,8 @@ exports.resetPassword = async (req, res, next) => {
 
     await sequelize.query(`
       UPDATE users SET password_hash = :hash, force_password_change = :force,
-        last_password_change = NOW(), updated_at = NOW()
+        last_password_change = NOW(), updated_at = NOW(),
+        failed_login_attempts = 0, locked_until = NULL
       WHERE id = :id;
     `, { replacements: { hash, force: force_change, id } });
 

@@ -81,6 +81,11 @@ router.get('/:enrollment_id',
   ctrl.getResults
 );
 
+router.get('/:enrollment_id/report-card',
+  requirePermission('results.view'),
+  ctrl.getReportCard
+);
+
 router.delete('/:enrollment_id',
   requirePermission('results.edit'),
   [

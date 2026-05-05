@@ -3,14 +3,117 @@
 const router = require('express').Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { body } = require('express-validator');
 const validate = require('../middlewares/validate');
 const sequelize = require('../config/database');
 const studentLoginValidation = require('../middlewares/studentLoginValidator');
 const { loadUserPermissions } = require('../middlewares/checkPermission');
 const { normalizeUserRole } = require('../utils/roles');
+const { authenticate } = require('../middlewares/auth');
+const { authLimiter } = require('../middlewares/rateLimiter');
+const { sendEmail } = require('../utils/mailer');
+
+const MAX_FAILED_ATTEMPTS = 5;
+const LOCKOUT_DURATION = 15 * 60 * 1000; // 15 minutes
+const RESET_TOKEN_EXPIRY = 3600000; // 1 hour
+
+router.post('/forgot-password',
+  authLimiter,
+  [body('email').isEmail()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const email = String(req.body.email || '').trim().toLowerCase();
+      
+      // Check both users and students
+      const [[user]] = await sequelize.query(`
+        SELECT id, 'user' as type, name, email FROM users WHERE LOWER(email) = :email AND is_deleted = false
+        UNION
+        SELECT s.id, 'student' as type, CONCAT(s.first_name, ' ', s.last_name) as name, sp.email 
+        FROM students s
+        JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
+        WHERE LOWER(sp.email) = :email AND s.is_deleted = false
+        LIMIT 1;
+      `, { replacements: { email } });
+
+      // Security best practice: don't reveal if email exists
+      if (!user) return res.ok({}, 'If an account with that email exists, a password reset link has been sent.');
+
+      const token = crypto.randomBytes(32).toString('hex');
+      const expires = new Date(Date.now() + RESET_TOKEN_EXPIRY);
+
+      const table = user.type === 'user' ? 'users' : 'students';
+      await sequelize.query(`
+        UPDATE ${table}
+        SET reset_password_token = :token,
+            reset_password_expires = :expires
+        WHERE id = :id;
+      `, { replacements: { token, expires, id: user.id } });
+
+      const resetUrl = `${process.env.FRONTEND_URL || 'http://localhost:5173'}/reset-password?token=${token}&email=${email}`;
+
+      await sendEmail({
+        to: user.email,
+        subject: 'Password Reset Request',
+        text: `Hello ${user.name},\n\nYou requested a password reset. Please click the link below to reset your password:\n\n${resetUrl}\n\nIf you did not request this, please ignore this email.\n`,
+        html: `<p>Hello ${user.name},</p><p>You requested a password reset. Please click the link below to reset your password:</p><p><a href="${resetUrl}">${resetUrl}</a></p><p>If you did not request this, please ignore this email.</p>`,
+      });
+
+      return res.ok({}, 'If an account with that email exists, a password reset link has been sent.');
+    } catch (err) { next(err); }
+  }
+);
+
+router.post('/reset-password',
+  authLimiter,
+  [
+    body('token').notEmpty(),
+    body('email').isEmail(),
+    body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters long'),
+  ],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { token, password } = req.body;
+      const email = String(req.body.email || '').trim().toLowerCase();
+
+      // Check both users and students
+      const [[user]] = await sequelize.query(`
+        SELECT id, 'user' as type FROM users 
+        WHERE LOWER(email) = :email AND reset_password_token = :token AND reset_password_expires > NOW() AND is_deleted = false
+        UNION
+        SELECT s.id, 'student' as type
+        FROM students s
+        JOIN student_profiles sp ON sp.student_id = s.id AND sp.is_current = true
+        WHERE LOWER(sp.email) = :email AND s.reset_password_token = :token AND s.reset_password_expires > NOW() AND s.is_deleted = false
+        LIMIT 1;
+      `, { replacements: { email, token } });
+
+      if (!user) return res.fail('Invalid or expired reset token.', [], 400);
+
+      const hash = await bcrypt.hash(password, 12);
+      const table = user.type === 'user' ? 'users' : 'students';
+
+      await sequelize.query(`
+        UPDATE ${table}
+        SET password_hash = :hash,
+            reset_password_token = NULL,
+            reset_password_expires = NULL,
+            failed_login_attempts = 0,
+            locked_until = NULL,
+            force_password_change = false,
+            updated_at = NOW()
+        WHERE id = :id;
+      `, { replacements: { hash, id: user.id } });
+
+      return res.ok({}, 'Password has been reset successfully. You can now log in with your new password.');
+    } catch (err) { next(err); }
+  }
+);
 
 router.post('/login',
+  authLimiter,
   [body('email').isEmail(), body('password').notEmpty()],
   validate,
   async (req, res, next) => {
@@ -18,24 +121,56 @@ router.post('/login',
       const { password } = req.body;
       const email = String(req.body.email || '').trim().toLowerCase();
       const [[user]] = await sequelize.query(`
-        SELECT id, school_id, name, email, password_hash, role, is_active, force_password_change
+        SELECT id, school_id, name, email, password_hash, role, is_active, force_password_change, 
+               failed_login_attempts, locked_until
         FROM users
         WHERE LOWER(email) = :email
           AND is_deleted = false
         LIMIT 1;
       `, { replacements: { email } });
 
-      if (!user || !user.is_active) return res.fail('Invalid credentials.', [], 401);
+      if (!user) return res.fail('Invalid credentials.', [], 401);
+      if (!user.is_active) return res.fail('Account is deactivated.', [], 401);
+
+      // Check if account is locked
+      if (user.locked_until && new Date(user.locked_until) > new Date()) {
+        const remainingMinutes = Math.ceil((new Date(user.locked_until) - new Date()) / 60000);
+        return res.fail(`Account is temporarily locked. Please try again in ${remainingMinutes} minutes.`, [], 401);
+      }
 
       const valid = await bcrypt.compare(password, user.password_hash);
-      if (!valid) return res.fail('Invalid credentials.', [], 401);
+
+      if (!valid) {
+        // Increment failed attempts
+        const failedAttempts = (user.failed_login_attempts || 0) + 1;
+        let lockedUntil = null;
+
+        if (failedAttempts >= MAX_FAILED_ATTEMPTS) {
+          lockedUntil = new Date(Date.now() + LOCKOUT_DURATION);
+        }
+
+        await sequelize.query(`
+          UPDATE users
+          SET failed_login_attempts = :failedAttempts,
+              locked_until = :lockedUntil
+          WHERE id = :id;
+        `, { replacements: { failedAttempts, lockedUntil, id: user.id } });
+
+        if (lockedUntil) {
+          return res.fail(`Account locked due to too many failed attempts. Try again in 15 minutes.`, [], 401);
+        }
+        return res.fail('Invalid credentials.', [], 401);
+      }
 
       const normalizedRole = normalizeUserRole(user.role);
       const permissions = Array.from(await loadUserPermissions(user.id, normalizedRole));
 
+      // Reset failed attempts on success
       await sequelize.query(`
         UPDATE users
-        SET last_login_at = NOW()
+        SET last_login_at = NOW(),
+            failed_login_attempts = 0,
+            locked_until = NULL
         WHERE id = :id;
       `, { replacements: { id: user.id } });
 
@@ -146,6 +281,7 @@ router.post('/refresh',
 );
 
 router.post('/student/login',
+  authLimiter,
   studentLoginValidation,
   validate,
   async (req, res, next) => {
@@ -162,6 +298,8 @@ router.post('/student/login',
           s.password_hash,
           s.is_active,
           s.is_deleted,
+          s.failed_login_attempts,
+          s.locked_until,
           sp.email
         FROM students
         s
@@ -176,17 +314,47 @@ router.post('/student/login',
         LIMIT 1;
       `, { replacements: { identifier: loginIdentifier } });
 
-      if (!student || !student.is_active || !student.password_hash) {
-        return res.fail('Invalid credentials.', [], 401);
+      if (!student) return res.fail('Invalid credentials.', [], 401);
+      if (!student.is_active) return res.fail('Account is deactivated.', [], 401);
+
+      // Check if account is locked
+      if (student.locked_until && new Date(student.locked_until) > new Date()) {
+        const remainingMinutes = Math.ceil((new Date(student.locked_until) - new Date()) / 60000);
+        return res.fail(`Account is temporarily locked. Please try again in ${remainingMinutes} minutes.`, [], 401);
       }
 
+      if (!student.password_hash) return res.fail('Portal access not set up.', [], 401);
+
       const valid = await bcrypt.compare(password, student.password_hash);
-      if (!valid) return res.fail('Invalid credentials.', [], 401);
+      
+      if (!valid) {
+        // Increment failed attempts
+        const failedAttempts = (student.failed_login_attempts || 0) + 1;
+        let lockedUntil = null;
+
+        if (failedAttempts >= MAX_FAILED_ATTEMPTS) {
+          lockedUntil = new Date(Date.now() + LOCKOUT_DURATION);
+        }
+
+        await sequelize.query(`
+          UPDATE students
+          SET failed_login_attempts = :failedAttempts,
+              locked_until = :lockedUntil
+          WHERE id = :id;
+        `, { replacements: { failedAttempts, lockedUntil, id: student.id } });
+
+        if (lockedUntil) {
+          return res.fail(`Account locked due to too many failed attempts. Try again in 15 minutes.`, [], 401);
+        }
+        return res.fail('Invalid credentials.', [], 401);
+      }
 
       await sequelize.query(`
         UPDATE students
         SET last_login_at = NOW(),
-            updated_at = NOW()
+            updated_at = NOW(),
+            failed_login_attempts = 0,
+            locked_until = NULL
         WHERE id = :id;
       `, { replacements: { id: student.id } });
 
@@ -216,6 +384,34 @@ router.post('/student/login',
           permissions: [],
         },
       }, 'Student login successful.');
+    } catch (err) { next(err); }
+  }
+);
+
+router.post('/register-push-token',
+  authenticate,
+  [body('token').notEmpty()],
+  validate,
+  async (req, res, next) => {
+    try {
+      const { token, platform, device_name } = req.body;
+      const isStudent = req.user.role === 'student';
+      const userId = isStudent ? null : req.user.id;
+      const studentId = isStudent ? req.user.id : null;
+
+      await sequelize.query(`
+        INSERT INTO push_tokens (user_id, student_id, token, platform, device_name, last_used, created_at, updated_at)
+        VALUES (:userId, :studentId, :token, :platform, :device_name, NOW(), NOW(), NOW())
+        ON CONFLICT (token) DO UPDATE SET
+          user_id = EXCLUDED.user_id,
+          student_id = EXCLUDED.student_id,
+          last_used = NOW(),
+          updated_at = NOW();
+      `, {
+        replacements: { userId, studentId, token, platform: platform || null, device_name: device_name || null },
+      });
+
+      res.ok({}, 'Push token registered.');
     } catch (err) { next(err); }
   }
 );

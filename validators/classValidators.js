@@ -75,6 +75,9 @@ const createSectionRules = [
   body('capacity')
     .optional({ nullable: true })
     .isInt({ min: 1 }).withMessage('Capacity must be positive'),
+  body('class_teacher_id')
+    .optional({ nullable: true })
+    .isInt().withMessage('Invalid teacher ID'),
 ];
 
 const updateSectionRules = [
@@ -90,6 +93,9 @@ const updateSectionRules = [
   body('capacity')
     .optional({ nullable: true })
     .isInt({ min: 1 }).withMessage('Capacity must be positive'),
+  body('class_teacher_id')
+    .optional({ nullable: true })
+    .isInt().withMessage('Invalid teacher ID'),
   body('is_active')
     .optional()
     .isBoolean().withMessage('is_active must be boolean'),

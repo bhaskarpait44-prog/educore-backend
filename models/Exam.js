@@ -12,6 +12,8 @@ const Exam = sequelize.define('Exam', {
   end_date      : { type: DataTypes.DATEONLY, allowNull: false },
   total_marks   : { type: DataTypes.DECIMAL(8, 2), allowNull: false },
   passing_marks : { type: DataTypes.DECIMAL(8, 2), allowNull: false },
+  weightage     : { type: DataTypes.DECIMAL(5, 2), allowNull: false, defaultValue: 100.00 },
+  publish_controls: { type: DataTypes.JSONB, allowNull: false, defaultValue: {} },
   status        : { type: DataTypes.ENUM('upcoming', 'ongoing', 'completed', 'draft', 'published'), allowNull: false, defaultValue: 'draft' },
   published_at  : { type: DataTypes.DATE, allowNull: true },
   published_by  : { type: DataTypes.INTEGER, allowNull: true },

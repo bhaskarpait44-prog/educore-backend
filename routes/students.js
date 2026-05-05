@@ -5,6 +5,17 @@ const { body, param } = require('express-validator');
 const validate = require('../middlewares/validate');
 const { requireAdmin, requireAdminOrTeacher } = require('../middlewares/auth');
 const ctrl     = require('../controllers/studentController');
+const multer   = require('multer');
+const path     = require('path');
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, 'uploads/students/documents'),
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+const upload = multer({ storage });
 
 router.post('/',                  requireAdmin, [
   body('admission_no').notEmpty(),
@@ -45,5 +56,19 @@ router.delete('/:id',             requireAdmin, [
 router.get('/:id/history',        requireAdminOrTeacher, [
   param('id').isInt(),
 ], validate, ctrl.getHistory);
+
+// ── Documents ─────────────────────────────────────────────────────────────
+router.get('/:id/documents',      requireAdminOrTeacher, [
+  param('id').isInt(),
+], validate, ctrl.getDocuments);
+
+router.post('/:id/documents',     requireAdmin, upload.single('document'), [
+  param('id').isInt(),
+], validate, ctrl.uploadDocument);
+
+router.delete('/:id/documents/:docId', requireAdmin, [
+  param('id').isInt(),
+  param('docId').isInt(),
+], validate, ctrl.deleteDocument);
 
 module.exports = router;

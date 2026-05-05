@@ -13,6 +13,9 @@ const StudentResult = sequelize.define('StudentResult', {
   result                    : { type: DataTypes.ENUM('pass', 'fail', 'compartment', 'detained'), allowNull: false },
   compartment_subjects      : { type: DataTypes.JSON, allowNull: true },
   is_promoted               : { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+  is_locked                 : { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
+  locked_at                 : { type: DataTypes.DATE, allowNull: true },
+  locked_by                 : { type: DataTypes.INTEGER, allowNull: true },
   promotion_override_by     : { type: DataTypes.INTEGER, allowNull: true },
   promotion_override_reason : { type: DataTypes.TEXT, allowNull: true },
 }, { tableName: 'student_results', underscored: true });

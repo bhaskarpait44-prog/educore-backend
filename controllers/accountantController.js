@@ -2,9 +2,22 @@
 
 const bcrypt = require('bcryptjs');
 const PDFDocument = require('pdfkit');
-const sequelize = require('../config/database');
+const { 
+  Session, 
+  School, 
+  User, 
+  FeeInvoice, 
+  FeePayment, 
+  FeeStructure, 
+  Enrollment, 
+  Student, 
+  Class, 
+  Section,
+  sequelize 
+} = require('../models');
 const feeManager = require('../utils/feeManager');
 const feeController = require('./feeController');
+const { notifyClass, notifyAllStudents, sendNotification } = require('../utils/notification');
 
 const PAYMENT_MODES = ['cash', 'online', 'cheque', 'dd', 'upi'];
 const CONCESSION_REASONS = [
@@ -25,24 +38,21 @@ const toNumber = (value) => {
 
 async function resolveSessionId(requestedSessionId, schoolId) {
   if (requestedSessionId) {
-    const [[session]] = await sequelize.query(`
-      SELECT id, name, start_date, end_date, is_current
-      FROM sessions
-      WHERE id = :sessionId AND school_id = :schoolId
-      LIMIT 1;
-    `, {
-      replacements: { sessionId: requestedSessionId, schoolId },
+    const session = await Session.findOne({
+      where: { id: requestedSessionId, school_id: schoolId },
+      attributes: ['id', 'name', 'start_date', 'end_date', 'is_current']
     });
     if (session) return session;
   }
 
-  const [[currentSession]] = await sequelize.query(`
-    SELECT id, name, start_date, end_date, is_current
-    FROM sessions
-    WHERE school_id = :schoolId
-    ORDER BY CASE WHEN is_current = true THEN 0 ELSE 1 END, start_date DESC
-    LIMIT 1;
-  `, { replacements: { schoolId } });
+  const currentSession = await Session.findOne({
+    where: { school_id: schoolId },
+    attributes: ['id', 'name', 'start_date', 'end_date', 'is_current'],
+    order: [
+      [sequelize.literal('CASE WHEN is_current = true THEN 0 ELSE 1 END'), 'ASC'],
+      ['start_date', 'DESC']
+    ]
+  });
 
   return currentSession || null;
 }
@@ -77,12 +87,9 @@ function streamPdf(res, fileName, render) {
 }
 
 async function getSchoolProfile(schoolId) {
-  const [[school]] = await sequelize.query(`
-    SELECT id, name, address, phone, email
-    FROM schools
-    WHERE id = :schoolId
-    LIMIT 1;
-  `, { replacements: { schoolId } });
+  const school = await School.findByPk(schoolId, {
+    attributes: ['id', 'name', 'address', 'phone', 'email']
+  });
   return school || {
     name: 'School',
     address: '',
@@ -231,53 +238,65 @@ async function createFeeNotice(req, {
   content,
   targetScope,
   classId = null,
+  sectionId = null,
   targetStudentId = null,
   expiryDate = null,
 }) {
-  const [[notice]] = await sequelize.query(`
-    INSERT INTO teacher_notices (
-      teacher_id, class_id, section_id, target_student_id,
-      title, content, category, target_scope,
-      publish_date, expiry_date, is_active, created_at, updated_at
-    )
-    VALUES (
-      :userId, :classId, NULL, :targetStudentId,
-      :title, :content, 'fee', :targetScope,
-      NOW(), :expiryDate, true, NOW(), NOW()
-    )
-    RETURNING *;
-  `, {
-    replacements: {
-      userId: req.user.id,
-      classId,
-      targetStudentId,
-      title,
-      content,
-      targetScope,
-      expiryDate,
-    },
-  });
+  try {
+    const [[notice]] = await sequelize.query(`
+      INSERT INTO teacher_notices (
+        teacher_id, class_id, section_id, target_student_id,
+        title, content, category, target_scope,
+        publish_date, expiry_date, is_active, created_at, updated_at
+      )
+      VALUES (
+        :userId, :classId, :sectionId, :targetStudentId,
+        :title, :content, 'fee', :targetScope,
+        NOW(), :expiryDate, true, NOW(), NOW()
+      )
+      RETURNING *;
+    `, {
+      replacements: {
+        userId: req.user.id,
+        classId,
+        sectionId,
+        targetStudentId,
+        title,
+        content,
+        targetScope,
+        expiryDate,
+      },
+    });
 
-  await writeFinancialAudit(req, 'teacher_notices', notice.id, 'created', title, 'Accountant fee notice created');
-  return notice;
+    await writeFinancialAudit(req, 'teacher_notices', notice.id, 'created', title, 'Accountant fee notice created');
+
+    if (targetScope === 'all_students') {
+      await notifyAllStudents(req.user.school_id, title, content, 'notice', { notice_id: notice.id, category: 'fee' });
+    } else if (targetScope === 'whole_class' || targetScope === 'specific_section') {
+      await notifyClass(classId, sectionId, title, content, 'notice', { notice_id: notice.id, category: 'fee' });
+    } else if (targetScope === 'specific_student') {
+      await sendNotification({ studentId: targetStudentId, title, content, type: 'notice', data: { notice_id: notice.id, category: 'fee' } });
+    }
+
+    return notice;
+  } catch (error) {
+    console.error('[Fee Notice Error]', error);
+    throw error;
+  }
 }
 
 async function ensureClassBelongsToSchool(classId, schoolId) {
-  const [[row]] = await sequelize.query(`
-    SELECT id FROM classes
-    WHERE id = :classId AND school_id = :schoolId AND COALESCE(is_deleted, false) = false
-    LIMIT 1;
-  `, { replacements: { classId, schoolId } });
-  return row || null;
+  return await Class.findOne({
+    where: { id: classId, school_id: schoolId, is_deleted: false },
+    attributes: ['id']
+  });
 }
 
 async function ensureStudentBelongsToSchool(studentId, schoolId) {
-  const [[row]] = await sequelize.query(`
-    SELECT id FROM students
-    WHERE id = :studentId AND school_id = :schoolId AND is_deleted = false
-    LIMIT 1;
-  `, { replacements: { studentId, schoolId } });
-  return row || null;
+  return await Student.findOne({
+    where: { id: studentId, school_id: schoolId, is_deleted: false },
+    attributes: ['id']
+  });
 }
 
 exports.getDashboard = feeController.getDashboard;
@@ -1065,16 +1084,19 @@ exports.getNotices = async (req, res, next) => {
     const [rows] = await sequelize.query(`
       SELECT
         n.*,
+        u.name AS teacher_name,
+        u.role AS teacher_role,
         c.name AS class_name,
         s.first_name || ' ' || s.last_name AS target_student_name,
         COUNT(snr.id)::int AS student_read_count
       FROM teacher_notices n
+      JOIN users u ON u.id = n.teacher_id
       LEFT JOIN classes c ON c.id = n.class_id
       LEFT JOIN students s ON s.id = n.target_student_id
       LEFT JOIN student_notice_reads snr ON snr.notice_id = n.id
       WHERE n.teacher_id = :userId
         AND n.category = 'fee'
-      GROUP BY n.id, c.name, s.first_name, s.last_name
+      GROUP BY n.id, u.id, c.id, s.id
       ORDER BY n.publish_date DESC;
     `, { replacements: { userId: req.user.id } });
     res.ok({ notices: rows }, `${rows.length} notice(s) found.`);

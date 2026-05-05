@@ -2,6 +2,7 @@
 
 const bcrypt = require('bcryptjs');
 const sequelize = require('../config/database');
+const { notifyClass, notifyAllStudents, sendNotification, notifyAllTeachers, notifySubject } = require('../utils/notification');
 
 const TODAY = () => new Date().toISOString().slice(0, 10);
 const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
@@ -149,7 +150,7 @@ function assertMarksAccess(scope, classId, sectionId, subjectId) {
 function assertClassTeacherAccess(scope, classId, sectionId) {
   const sectionKey = `${classId}:${sectionId}`;
   if (!scope.classTeacherSections.has(sectionKey)) {
-    const error = new Error('Only the assigned class teacher can mark or edit attendance for this section.');
+    const error = new Error('Access Restricted: Only the assigned Class Teacher is authorized to manage daily attendance for this section. We appreciate your dedication to student success!');
     error.status = 403;
     throw error;
   }
@@ -431,6 +432,97 @@ async function getTeacherContext(req) {
   return { session, assignments, scope };
 }
 
+async function enrichAssignment(assignment, session) {
+  const [[stats]] = await sequelize.query(`
+    SELECT
+      COUNT(*) AS student_count,
+      COUNT(a.id) FILTER (WHERE a.date = :today) AS attendance_rows_today,
+      ROUND(
+        AVG(CASE WHEN a.status IN ('present', 'late') THEN 100 WHEN a.status = 'half_day' THEN 50 ELSE 0 END),
+        2
+      ) AS attendance_rate
+    FROM enrollments e
+    LEFT JOIN attendance a
+      ON a.enrollment_id = e.id
+     AND a.date BETWEEN :weekStart AND :today
+    WHERE e.session_id = :sessionId
+      AND e.status = 'active'
+      AND e.class_id = :classId
+      AND e.section_id = :sectionId;
+  `, {
+    replacements: {
+      today: TODAY(),
+      weekStart: TODAY(),
+      sessionId: session?.id || 0,
+      classId: assignment.class_id,
+      sectionId: assignment.section_id,
+    },
+  });
+
+  const [[below75]] = await sequelize.query(`
+    SELECT COUNT(*) AS cnt
+    FROM (
+      SELECT e.id, ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id), 0) * 100, 2) AS pct
+      FROM enrollments e
+      LEFT JOIN attendance a ON a.enrollment_id = e.id
+      WHERE e.session_id = :sessionId
+        AND e.status = 'active'
+        AND e.class_id = :classId
+        AND e.section_id = :sectionId
+      GROUP BY e.id
+    ) x
+    WHERE x.pct < 75;
+  `, {
+    replacements: {
+      sessionId: session?.id || 0,
+      classId: assignment.class_id,
+      sectionId: assignment.section_id,
+    },
+  });
+
+  const [[feeDefaulters]] = await sequelize.query(`
+    SELECT COUNT(DISTINCT fi.enrollment_id) AS cnt
+    FROM fee_invoices fi
+    JOIN enrollments e ON e.id = fi.enrollment_id
+    WHERE e.session_id = :sessionId
+      AND e.class_id = :classId
+      AND e.section_id = :sectionId
+      AND fi.status IN ('pending', 'partial');
+  `, {
+    replacements: {
+      sessionId: session?.id || 0,
+      classId: assignment.class_id,
+      sectionId: assignment.section_id,
+    },
+  });
+
+  const [[pendingRemarks]] = await sequelize.query(`
+    SELECT COUNT(*) AS cnt
+    FROM student_remarks sr
+    JOIN enrollments e ON e.id = sr.enrollment_id
+    WHERE e.session_id = :sessionId
+      AND e.class_id = :classId
+      AND e.section_id = :sectionId
+      AND sr.is_deleted = false;
+  `, {
+    replacements: {
+      sessionId: session?.id || 0,
+      classId: assignment.class_id,
+      sectionId: assignment.section_id,
+    },
+  });
+
+  return {
+    ...assignment,
+    student_count: Number(stats?.student_count || 0),
+    today_attendance_marked: Number(stats?.attendance_rows_today || 0) > 0,
+    attendance_rate: Number(stats?.attendance_rate || 0),
+    below_75_count: Number(below75?.cnt || 0),
+    fee_defaulters_count: Number(feeDefaulters?.cnt || 0),
+    pending_remarks_count: Number(pendingRemarks?.cnt || 0),
+  };
+}
+
 function validateHomeworkPayload(payload, { partial = false } = {}) {
   const allowedSubmissionTypes = new Set(['written', 'online', 'both']);
   const requiredFields = ['class_id', 'section_id', 'subject_id', 'title', 'description', 'due_date', 'submission_type'];
@@ -514,8 +606,8 @@ async function ensureHomeworkPendingRows(homeworkId, homework) {
 }
 
 function validateNoticePayload(payload, { partial = false } = {}) {
-  const allowedCategories = new Set(['general', 'homework', 'exam', 'event', 'holiday', 'other']);
-  const allowedScopes = new Set(['my_class_only', 'specific_section', 'specific_student']);
+  const allowedCategories = new Set(['general', 'homework', 'exam', 'event', 'holiday', 'other', 'fee']);
+  const allowedScopes = new Set(['my_class_only', 'specific_section', 'specific_student', 'all_students', 'specific_subject', 'whole_class', 'teachers', 'whole_school']);
 
   if (!partial) {
     requireFields(payload, ['title', 'content', 'target_scope']);
@@ -528,15 +620,19 @@ function validateNoticePayload(payload, { partial = false } = {}) {
   }
 
   if (payload.target_scope != null && !allowedScopes.has(payload.target_scope)) {
-    const error = new Error('Teachers can only target assigned class, assigned section, or accessible students.');
+    const error = new Error('Invalid target scope.');
     error.status = 422;
     throw error;
   }
 
-  if (payload.expiry_date && payload.publish_date && new Date(payload.expiry_date) < new Date(payload.publish_date)) {
-    const error = new Error('expiry_date cannot be earlier than publish_date.');
-    error.status = 422;
-    throw error;
+  if (payload.expiry_date && payload.publish_date) {
+    const expiry = new Date(payload.expiry_date).toISOString().slice(0, 10);
+    const publish = new Date(payload.publish_date).toISOString().slice(0, 10);
+    if (expiry < publish) {
+      const error = new Error('expiry_date cannot be earlier than publish_date.');
+      error.status = 422;
+      throw error;
+    }
   }
 }
 
@@ -662,11 +758,17 @@ async function ensureTeacherLeaveBalances(teacherId, sessionId) {
 
 exports.dashboard = async (req, res, next) => {
   try {
-    const { session, scope } = await getTeacherContext(req);
+    const { session, assignments, scope } = await getTeacherContext(req);
     const today = TODAY();
     const schedule = decorateScheduleRows(await getTodayScheduleRows(req.user.id, session?.id));
     const recentActivity = await getRecentActivity(req);
     const pendingMarks = await getPendingMarkCount(scope, session?.id, req.user.id);
+
+    const classTeacherAssignments = assignments.filter((assignment) => assignment.is_class_teacher);
+    const subjectAssignments = assignments.filter((assignment) => !assignment.is_class_teacher);
+
+    const myClass = await Promise.all(classTeacherAssignments.map((a) => enrichAssignment(a, session)));
+    const subjectClasses = await Promise.all(subjectAssignments.map((a) => enrichAssignment(a, session)));
 
     let attendanceStatus = { marked: 0, total: 0 };
     let studentToday = { present: 0, absent: 0, percentage: 0 };
@@ -674,14 +776,14 @@ exports.dashboard = async (req, res, next) => {
     if (scope.sectionIds.length > 0) {
       const [[attendanceRow]] = await sequelize.query(`
         SELECT
-          COUNT(DISTINCT e.section_id) FILTER (WHERE a.id IS NOT NULL) AS marked,
+          COUNT(DISTINCT CASE WHEN a.id IS NOT NULL THEN e.section_id ELSE NULL END) AS marked,
           COUNT(DISTINCT e.section_id) AS total,
-          COUNT(*) FILTER (WHERE a.status IN ('present', 'late')) AS present,
-          COUNT(*) FILTER (WHERE a.status = 'absent') AS absent,
+          SUM(CASE WHEN a.status IN ('present', 'late') THEN 1 ELSE 0 END) AS present,
+          SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) AS absent,
           ROUND(
             (
-              COUNT(*) FILTER (WHERE a.status IN ('present', 'late'))
-              + COUNT(*) FILTER (WHERE a.status = 'half_day') * 0.5
+              SUM(CASE WHEN a.status IN ('present', 'late') THEN 1 ELSE 0 END)
+              + SUM(CASE WHEN a.status = 'half_day' THEN 1 ELSE 0 END) * 0.5
             ) / NULLIF(COUNT(a.id), 0) * 100,
             2
           ) AS percentage
@@ -727,6 +829,8 @@ exports.dashboard = async (req, res, next) => {
       },
       today_schedule: schedule,
       recent_activity: recentActivity,
+      my_class: myClass,
+      subject_classes: subjectClasses,
     }, 'Teacher dashboard loaded.');
   } catch (err) { next(err); }
 };
@@ -837,99 +941,8 @@ exports.myClasses = async (req, res, next) => {
     const classTeacherAssignments = assignments.filter((assignment) => assignment.is_class_teacher);
     const subjectAssignments = assignments.filter((assignment) => !assignment.is_class_teacher);
 
-    const enrichAssignment = async (assignment) => {
-      const [[stats]] = await sequelize.query(`
-        SELECT
-          COUNT(*) AS student_count,
-          COUNT(a.id) FILTER (WHERE a.date = :today) AS attendance_rows_today,
-          ROUND(
-            AVG(CASE WHEN a.status IN ('present', 'late') THEN 100 WHEN a.status = 'half_day' THEN 50 ELSE 0 END),
-            2
-          ) AS attendance_rate
-        FROM enrollments e
-        LEFT JOIN attendance a
-          ON a.enrollment_id = e.id
-         AND a.date BETWEEN :weekStart AND :today
-        WHERE e.session_id = :sessionId
-          AND e.status = 'active'
-          AND e.class_id = :classId
-          AND e.section_id = :sectionId;
-      `, {
-        replacements: {
-          today: TODAY(),
-          weekStart: TODAY(),
-          sessionId: session?.id || 0,
-          classId: assignment.class_id,
-          sectionId: assignment.section_id,
-        },
-      });
-
-      const [[below75]] = await sequelize.query(`
-        SELECT COUNT(*) AS cnt
-        FROM (
-          SELECT e.id, ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id), 0) * 100, 2) AS pct
-          FROM enrollments e
-          LEFT JOIN attendance a ON a.enrollment_id = e.id
-          WHERE e.session_id = :sessionId
-            AND e.status = 'active'
-            AND e.class_id = :classId
-            AND e.section_id = :sectionId
-          GROUP BY e.id
-        ) x
-        WHERE x.pct < 75;
-      `, {
-        replacements: {
-          sessionId: session?.id || 0,
-          classId: assignment.class_id,
-          sectionId: assignment.section_id,
-        },
-      });
-
-      const [[feeDefaulters]] = await sequelize.query(`
-        SELECT COUNT(DISTINCT fi.enrollment_id) AS cnt
-        FROM fee_invoices fi
-        JOIN enrollments e ON e.id = fi.enrollment_id
-        WHERE e.session_id = :sessionId
-          AND e.class_id = :classId
-          AND e.section_id = :sectionId
-          AND fi.status IN ('pending', 'partial');
-      `, {
-        replacements: {
-          sessionId: session?.id || 0,
-          classId: assignment.class_id,
-          sectionId: assignment.section_id,
-        },
-      });
-
-      const [[pendingRemarks]] = await sequelize.query(`
-        SELECT COUNT(*) AS cnt
-        FROM student_remarks sr
-        JOIN enrollments e ON e.id = sr.enrollment_id
-        WHERE e.session_id = :sessionId
-          AND e.class_id = :classId
-          AND e.section_id = :sectionId
-          AND sr.is_deleted = false;
-      `, {
-        replacements: {
-          sessionId: session?.id || 0,
-          classId: assignment.class_id,
-          sectionId: assignment.section_id,
-        },
-      });
-
-      return {
-        ...assignment,
-        student_count: Number(stats?.student_count || 0),
-        today_attendance_marked: Number(stats?.attendance_rows_today || 0) > 0,
-        attendance_rate: Number(stats?.attendance_rate || 0),
-        below_75_count: Number(below75?.cnt || 0),
-        fee_defaulters_count: Number(feeDefaulters?.cnt || 0),
-        pending_remarks_count: Number(pendingRemarks?.cnt || 0),
-      };
-    };
-
-    const myClass = await Promise.all(classTeacherAssignments.map(enrichAssignment));
-    const subjectClasses = await Promise.all(subjectAssignments.map(enrichAssignment));
+    const myClass = await Promise.all(classTeacherAssignments.map((a) => enrichAssignment(a, session)));
+    const subjectClasses = await Promise.all(subjectAssignments.map((a) => enrichAssignment(a, session)));
 
     res.ok({ my_class: myClass, subject_classes: subjectClasses }, 'Teacher classes loaded.');
   } catch (err) { next(err); }
@@ -996,7 +1009,7 @@ exports.attendanceStatus = async (req, res, next) => {
       replacements: {
         today: TODAY(),
         sessionId: session?.id || 0,
-        sectionIds: scope.sectionIds.length ? scope.sectionIds : [-1],
+        sectionIds: scope.sectionIds,
       },
     });
 
@@ -1010,13 +1023,7 @@ exports.attendanceStudents = async (req, res, next) => {
     requireFields(req.query, ['class_id', 'section_id']);
 
     const { session, scope } = await getTeacherContext(req);
-    assertAccess(scope, Number(class_id), Number(section_id), subject_id ? Number(subject_id) : null);
-    assertClassTeacherAccess(scope, Number(class_id), Number(section_id));
-    const access = {
-      allowed: true,
-      isClassTeacher: true,
-      isSubjectTeacher: false,
-    };
+    const access = assertAccess(scope, Number(class_id), Number(section_id), subject_id ? Number(subject_id) : null);
 
     const [students] = await sequelize.query(`
       SELECT
@@ -1081,8 +1088,8 @@ exports.markAttendance = async (req, res, next) => {
     requireFields(req.body, ['class_id', 'section_id']);
 
     const { session, scope } = await getTeacherContext(req);
-    const access = assertAccess(scope, Number(class_id), Number(section_id), subject_id ? Number(subject_id) : null);
     assertClassTeacherAccess(scope, Number(class_id), Number(section_id));
+    const access = getAccess(scope, Number(class_id), Number(section_id));
     const isPast = date < TODAY();
 
     const [existingRows] = await sequelize.query(`
@@ -1182,7 +1189,6 @@ exports.updateAttendance = async (req, res, next) => {
     const record = await getEnrollmentByAttendanceId(Number(id));
     if (!record) return res.fail('Attendance record not found.', [], 404);
 
-    assertAccess(scope, record.class_id, record.section_id);
     assertClassTeacherAccess(scope, record.class_id, record.section_id);
 
     await sequelize.query(`
@@ -1299,10 +1305,10 @@ exports.attendanceSummaryReport = async (req, res, next) => {
         s.first_name,
         s.last_name,
         COUNT(a.id) AS total_days,
-        COUNT(a.id) FILTER (WHERE a.status = 'present') AS present,
-        COUNT(a.id) FILTER (WHERE a.status = 'absent') AS absent,
-        COUNT(a.id) FILTER (WHERE a.status = 'late') AS late,
-        COUNT(a.id) FILTER (WHERE a.status = 'half_day') AS half_day,
+        SUM(CASE WHEN a.status = 'present' THEN 1 ELSE 0 END) AS present,
+        SUM(CASE WHEN a.status = 'absent' THEN 1 ELSE 0 END) AS absent,
+        SUM(CASE WHEN a.status = 'late' THEN 1 ELSE 0 END) AS late,
+        SUM(CASE WHEN a.status = 'half_day' THEN 1 ELSE 0 END) AS half_day,
         ROUND(SUM(${PRESENT_SQL}) / NULLIF(COUNT(a.id), 0) * 100, 2) AS percentage
       FROM enrollments e
       JOIN students s ON s.id = e.student_id
@@ -1971,8 +1977,10 @@ exports.marksSummary = async (req, res, next) => {
 
 exports.studentList = async (req, res, next) => {
   try {
-    const { session, scope } = await getTeacherContext(req);
+    const { session, assignments, scope } = await getTeacherContext(req);
     if (scope.sectionIds.length === 0) return res.ok({ students: [] }, 'No accessible students.');
+
+    const { class_id, section_id, subject_id } = req.query;
 
     const [rows] = await sequelize.query(`
       SELECT
@@ -1999,7 +2007,14 @@ exports.studentList = async (req, res, next) => {
           FROM fee_invoices fi
           WHERE fi.enrollment_id = e.id
             AND fi.status IN ('pending', 'partial')
-        ) AS fee_balance
+        ) AS fee_balance,
+        (
+          SELECT STRING_AGG(ss.subject_id::text, ',')
+          FROM student_subjects ss
+          WHERE ss.student_id = s.id
+            AND ss.session_id = e.session_id
+            AND ss.is_active = true
+        ) AS subject_ids
       FROM enrollments e
       JOIN students s ON s.id = e.student_id
       JOIN classes c ON c.id = e.class_id
@@ -2017,21 +2032,46 @@ exports.studentList = async (req, res, next) => {
         AND e.status = 'active'
         AND s.is_deleted = false
         AND e.section_id IN (:sectionIds)
+        AND (:classId::int IS NULL OR e.class_id = :classId)
+        AND (:sectionId::int IS NULL OR e.section_id = :sectionId)
+        AND (:subjectId::int IS NULL OR EXISTS (
+          SELECT 1 FROM student_subjects ss2
+          WHERE ss2.student_id = s.id
+            AND ss2.session_id = e.session_id
+            AND ss2.subject_id = :subjectId
+            AND ss2.is_active = true
+        ))
       GROUP BY s.id, s.admission_no, s.first_name, s.last_name, s.gender, e.id, e.roll_number, e.class_id, e.section_id, c.name, sec.name, sp.photo_path, latest_result.percentage
       ORDER BY c.name, sec.name, COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D', '', 'g'), ''), '999999')::integer;
     `, {
       replacements: {
         sessionId: session?.id || 0,
         sectionIds: scope.sectionIds.length ? scope.sectionIds : [-1],
+        classId: class_id || null,
+        sectionId: section_id || null,
+        subjectId: subject_id || null,
       },
     });
 
     const classTeacherSections = scope.classTeacherSections;
+    const subjectsMap = new Map();
+    assignments.forEach((a) => {
+      if (a.subject_id) {
+        subjectsMap.set(a.subject_id, {
+          value: a.subject_id,
+          label: a.subject_name,
+          class_id: a.class_id,
+          section_id: a.section_id,
+        });
+      }
+    });
+
     res.ok({
       students: rows.map((row) => ({
         ...row,
         fee_balance: classTeacherSections.has(`${row.class_id}:${row.section_id}`) ? row.fee_balance : null,
       })),
+      available_subjects: [...subjectsMap.values()],
     }, `${rows.length} student(s) loaded.`);
   } catch (err) { next(err); }
 };
@@ -2481,6 +2521,8 @@ exports.createHomework = async (req, res, next) => {
 
     await ensureHomeworkPendingRows(homework.id, homework);
 
+    await notifyClass(class_id, section_id, `New Assignment: ${title}`, `A new assignment has been posted for your class. Due: ${due_date}`, 'homework', { homework_id: homework.id });
+
     await audit('homework', homework.id, {
       field: 'created',
       oldValue: null,
@@ -2760,6 +2802,7 @@ exports.noticeList = async (req, res, next) => {
       SELECT
         n.*,
         u.name AS teacher_name,
+        u.role AS teacher_role,
         c.name AS class_name,
         sec.name AS section_name,
         COUNT(nr.id) AS read_count,
@@ -2770,21 +2813,23 @@ exports.noticeList = async (req, res, next) => {
       LEFT JOIN sections sec ON sec.id = n.section_id
       LEFT JOIN teacher_notice_reads nr ON nr.notice_id = n.id
       WHERE n.is_active = true
+        AND u.school_id = :schoolId
         AND (n.expiry_date IS NULL OR n.expiry_date >= NOW())
         AND (:category::text IS NULL OR n.category = :category)
         AND (:mineOnly = false OR n.teacher_id = :teacherId)
         AND (
           n.target_scope = 'teachers'
+          OR n.target_scope = 'whole_school'
           OR (n.target_scope = 'specific_teacher' AND n.target_teacher_id = :teacherId)
-          OR (n.target_scope = 'my_class_only' AND (n.class_id, n.section_id) IN (${classTeacherPairs.map((_, i) => `(:classId${i}, :sectionId${i})`).join(', ') || '(NULL, NULL)'}))
+          OR (n.target_scope IN ('my_class_only', 'whole_class') AND (n.class_id, n.section_id) IN (${classTeacherPairs.map((_, i) => `(:classId${i}, :sectionId${i})`).join(', ') || '(NULL, NULL)'}))
           OR (n.target_scope = 'specific_section' AND n.section_id IN (:sectionIds))
           OR n.teacher_id = :teacherId
-        )
-      GROUP BY n.id, u.name, c.name, sec.name
+        )      GROUP BY n.id, u.id, c.id, sec.id
       ORDER BY n.publish_date DESC;
     `, {
       replacements: {
         teacherId: req.user.id,
+        schoolId: req.user.school_id,
         category,
         mineOnly,
         sectionIds: scope.sectionIds.length ? scope.sectionIds : [-1],
@@ -2810,6 +2855,7 @@ exports.createNotice = async (req, res, next) => {
       target_scope,
       class_id = null,
       section_id = null,
+      subject_id = null,
       target_student_id = null,
       attachment_path = null,
       publish_date = new Date(),
@@ -2818,7 +2864,7 @@ exports.createNotice = async (req, res, next) => {
     validateNoticePayload({ ...req.body, category, publish_date, expiry_date });
 
     const { scope } = await getTeacherContext(req);
-    if (target_scope === 'my_class_only') {
+    if (target_scope === 'my_class_only' || target_scope === 'whole_class') {
       requireFields({ class_id, section_id }, ['class_id', 'section_id']);
       if (!scope.classTeacherSections.has(`${class_id}:${section_id}`)) {
         return res.fail('You can only post to your own class teacher section.', [], 403);
@@ -2828,6 +2874,17 @@ exports.createNotice = async (req, res, next) => {
       requireFields({ class_id, section_id }, ['class_id', 'section_id']);
       assertAccess(scope, Number(class_id), Number(section_id));
     }
+    if (target_scope === 'specific_subject') {
+      requireFields({ class_id, section_id, subject_id }, ['class_id', 'section_id', 'subject_id']);
+      const isAssigned = scope.assignments.some(a => 
+        Number(a.class_id) === Number(class_id) && 
+        Number(a.section_id) === Number(section_id) && 
+        Number(a.subject_id) === Number(subject_id)
+      );
+      if (!isAssigned) {
+        return res.fail('You can only post to subjects you are assigned to.', [], 403);
+      }
+    }
     if (target_scope === 'specific_student') {
       requireFields({ target_student_id }, ['target_student_id']);
       await getAccessibleStudent(scope, req.user.school_id, Number(target_student_id));
@@ -2835,11 +2892,11 @@ exports.createNotice = async (req, res, next) => {
 
     const [[notice]] = await sequelize.query(`
       INSERT INTO teacher_notices (
-        teacher_id, class_id, section_id, target_student_id, title, content, category, target_scope,
+        teacher_id, class_id, section_id, subject_id, target_student_id, title, content, category, target_scope,
         attachment_path, publish_date, expiry_date, is_active, created_at, updated_at
       )
       VALUES (
-        :teacherId, :classId, :sectionId, :targetStudentId, :title, :content, :category, :targetScope,
+        :teacherId, :classId, :sectionId, :subjectId, :targetStudentId, :title, :content, :category, :targetScope,
         :attachmentPath, :publishDate, :expiryDate, true, NOW(), NOW()
       )
       RETURNING *;
@@ -2848,6 +2905,7 @@ exports.createNotice = async (req, res, next) => {
         teacherId: req.user.id,
         classId: class_id,
         sectionId: section_id,
+        subjectId: subject_id,
         targetStudentId: target_student_id,
         title,
         content,
@@ -2858,6 +2916,16 @@ exports.createNotice = async (req, res, next) => {
         expiryDate: expiry_date,
       },
     });
+
+    if (target_scope === 'my_class_only' || target_scope === 'specific_section' || target_scope === 'whole_class') {
+      await notifyClass(class_id, section_id, title, content, 'notice', { notice_id: notice.id });
+    } else if (target_scope === 'specific_subject') {
+      await notifySubject(subject_id, title, content, 'notice', { notice_id: notice.id });
+    } else if (target_scope === 'specific_student') {
+      await sendNotification({ studentId: target_student_id, title, content, type: 'notice', data: { notice_id: notice.id } });
+    } else if (target_scope === 'all_students') {
+       await notifyAllStudents(req.user.school_id, title, content, 'notice', { notice_id: notice.id });
+    }
 
     await audit('teacher_notices', notice.id, {
       field: 'created',
@@ -3141,9 +3209,8 @@ exports.profile = async (req, res, next) => {
 
     const [[marksSummary]] = await sequelize.query(`
       SELECT
-        COUNT(DISTINCT ex.id) FILTER (WHERE ex.status = 'published') AS published_exams,
-        COUNT(DISTINCT ex.id) FILTER (
-          WHERE ex.status = 'published'
+        SUM(CASE WHEN ex.status = 'published' THEN 1 ELSE 0 END) AS published_exams,
+        SUM(CASE WHEN ex.status = 'published'
             AND NOT EXISTS (
               SELECT 1
               FROM enrollments e
@@ -3162,8 +3229,7 @@ exports.profile = async (req, res, next) => {
                 AND e.session_id = ex.session_id
                 AND e.status = 'active'
                 AND er.id IS NULL
-            )
-        ) AS completed_exams
+            ) THEN 1 ELSE 0 END) AS completed_exams
       FROM exams ex
       WHERE ex.session_id = :sessionId;
     `, { replacements: { teacherId: req.user.id, sessionId: session?.id || 0 } });

@@ -144,8 +144,23 @@ exports.overview = async (req, res, next) => {
             AND teacher.role = 'teacher'
             AND teacher.is_deleted = false
         ) AS pending_corrections,
-        (SELECT COUNT(*) FROM teacher_notices WHERE is_active = true) AS active_notices,
-        (SELECT COUNT(*) FROM homework WHERE session_id = :sessionId AND status = 'active') AS active_homework;
+        (
+          SELECT COUNT(*)
+          FROM teacher_notices n
+          JOIN users u ON u.id = n.teacher_id
+          WHERE n.is_active = true
+            AND n.category != 'fee'
+            AND u.school_id = :schoolId
+        ) AS active_notices,
+        (
+          SELECT COUNT(*)
+          FROM homework h
+          JOIN users u ON u.id = h.teacher_id
+          WHERE h.session_id = :sessionId
+            AND h.status = 'active'
+            AND u.school_id = :schoolId
+        ) AS active_homework;
+
     `, {
       replacements: {
         schoolId: req.user.school_id,
@@ -520,9 +535,15 @@ exports.homework = async (req, res, next) => {
         ON hs.homework_id = h.id
        AND hs.enrollment_id = e.id
       WHERE h.session_id = :sessionId
-      GROUP BY h.id, u.name, c.name, sec.name, sub.name
+        AND u.school_id = :schoolId
+      GROUP BY h.id, u.id, c.id, sec.id, sub.id
       ORDER BY h.created_at DESC;
-    `, { replacements: { sessionId: session?.id || 0 } });
+    `, { 
+      replacements: { 
+        sessionId: session?.id || 0,
+        schoolId: req.user.school_id
+      } 
+    });
 
     res.ok({ homework: rows }, `${rows.length} homework item(s) found.`);
   } catch (err) { next(err); }
@@ -564,14 +585,41 @@ exports.updateHomework = async (req, res, next) => {
 
 exports.notices = async (req, res, next) => {
   try {
+    const { teacher_id, role, startDate, endDate, limit = 7 } = req.query;
+
+    let whereClause = 'WHERE u.school_id = :schoolId';
+    const replacements = { schoolId: req.user.school_id };
+
+    if (teacher_id) {
+      whereClause += ' AND n.teacher_id = :teacherId';
+      replacements.teacherId = teacher_id;
+    }
+
+    if (role) {
+      whereClause += ' AND u.role = :role';
+      replacements.role = role;
+    }
+
+    if (startDate) {
+      whereClause += ' AND n.publish_date >= :startDate';
+      replacements.startDate = startDate;
+    }
+
+    if (endDate) {
+      whereClause += ' AND n.publish_date <= :endDate';
+      replacements.endDate = endDate;
+    }
+
     const [rows] = await sequelize.query(`
       SELECT
         n.*,
         u.name AS teacher_name,
+        u.role AS teacher_role,
         tu.name AS target_teacher_name,
         CONCAT(ts.first_name, ' ', ts.last_name) AS target_student_name,
         c.name AS class_name,
         sec.name AS section_name,
+        sub.name AS subject_name,
         COUNT(DISTINCT nr.id) AS teacher_read_count,
         COUNT(DISTINCT snr.id) AS student_read_count
       FROM teacher_notices n
@@ -580,11 +628,16 @@ exports.notices = async (req, res, next) => {
       LEFT JOIN students ts ON ts.id = n.target_student_id
       LEFT JOIN classes c ON c.id = n.class_id
       LEFT JOIN sections sec ON sec.id = n.section_id
+      LEFT JOIN subjects sub ON sub.id = n.subject_id
       LEFT JOIN teacher_notice_reads nr ON nr.notice_id = n.id
       LEFT JOIN student_notice_reads snr ON snr.notice_id = n.id
-      GROUP BY n.id, u.name, tu.name, ts.first_name, ts.last_name, c.name, sec.name
-      ORDER BY n.publish_date DESC;
-    `);
+      ${whereClause}
+      GROUP BY n.id, u.id, tu.id, ts.id, c.id, sec.id, sub.id
+      ORDER BY n.publish_date DESC
+      LIMIT :limit;
+    `, {
+      replacements: { ...replacements, limit: Number(limit) },
+    });
 
     res.ok({ notices: rows }, `${rows.length} notice(s) found.`);
   } catch (err) { next(err); }
@@ -599,6 +652,7 @@ exports.createNotice = async (req, res, next) => {
       target_scope,
       class_id = null,
       section_id = null,
+      subject_id = null,
       target_student_id = null,
       target_teacher_id = null,
       attachment_path = null,
@@ -607,15 +661,22 @@ exports.createNotice = async (req, res, next) => {
     } = req.body;
 
     const allowedCategories = new Set(['general', 'homework', 'exam', 'event', 'holiday', 'other']);
-    const allowedScopes = new Set(['teachers', 'all_students', 'specific_section', 'specific_student', 'specific_teacher']);
+    const allowedScopes = new Set(['teachers', 'all_students', 'specific_section', 'specific_student', 'specific_teacher', 'specific_subject', 'whole_class', 'whole_school']);
     if (!title || !content || !target_scope) return res.fail('title, content and target_scope are required.', [], 422);
     if (!allowedCategories.has(category)) return res.fail('category is invalid.', [], 422);
     if (!allowedScopes.has(target_scope)) return res.fail('target_scope is invalid.', [], 422);
-    if (expiry_date && publish_date && new Date(expiry_date) < new Date(publish_date)) {
-      return res.fail('expiry_date cannot be earlier than publish_date.', [], 422);
+    if (expiry_date && publish_date) {
+      const expiry = new Date(expiry_date).toISOString().slice(0, 10);
+      const publish = new Date(publish_date).toISOString().slice(0, 10);
+      if (expiry < publish) {
+        return res.fail('expiry_date cannot be earlier than publish_date.', [], 422);
+      }
     }
-    if (target_scope === 'specific_section' && !class_id) {
+    if ((target_scope === 'specific_section' || target_scope === 'whole_class') && !class_id) {
       return res.fail('class_id is required for class or section notices.', [], 422);
+    }
+    if (target_scope === 'specific_subject' && (!class_id || !subject_id)) {
+      return res.fail('class_id and subject_id are required for subject-wise notices.', [], 422);
     }
     if (target_scope === 'specific_student' && !target_student_id) {
       return res.fail('target_student_id is required for student-wise notices.', [], 422);
@@ -626,12 +687,12 @@ exports.createNotice = async (req, res, next) => {
 
     const [[notice]] = await sequelize.query(`
       INSERT INTO teacher_notices (
-        teacher_id, class_id, section_id, target_student_id, target_teacher_id,
+        teacher_id, class_id, section_id, subject_id, target_student_id, target_teacher_id,
         title, content, category, target_scope, attachment_path,
         publish_date, expiry_date, is_active, created_at, updated_at
       )
       VALUES (
-        :postedBy, :classId, :sectionId, :targetStudentId, :targetTeacherId,
+        :postedBy, :classId, :sectionId, :subjectId, :targetStudentId, :targetTeacherId,
         :title, :content, :category, :targetScope, :attachmentPath,
         :publishDate, :expiryDate, true, NOW(), NOW()
       )
@@ -641,6 +702,7 @@ exports.createNotice = async (req, res, next) => {
         postedBy: req.user.id,
         classId: class_id,
         sectionId: section_id,
+        subjectId: subject_id,
         targetStudentId: target_student_id,
         targetTeacherId: target_teacher_id,
         title,
@@ -652,6 +714,27 @@ exports.createNotice = async (req, res, next) => {
         expiryDate: expiry_date,
       },
     });
+
+    const { notifyAllTeachers, notifySubject } = require('../utils/notification');
+
+    if (target_scope === 'all_students') {
+      await notifyAllStudents(req.user.school_id, title, content, 'notice', { notice_id: notice.id });
+    } else if (target_scope === 'whole_school') {
+      await Promise.all([
+        notifyAllStudents(req.user.school_id, title, content, 'notice', { notice_id: notice.id }),
+        notifyAllTeachers(req.user.school_id, title, content, 'notice', { notice_id: notice.id }),
+      ]);
+    } else if (target_scope === 'teachers') {
+      await notifyAllTeachers(req.user.school_id, title, content, 'notice', { notice_id: notice.id });
+    } else if (target_scope === 'specific_section' || target_scope === 'whole_class') {
+      await notifyClass(class_id, section_id, title, content, 'notice', { notice_id: notice.id });
+    } else if (target_scope === 'specific_subject') {
+      await notifySubject(subject_id, title, content, 'notice', { notice_id: notice.id });
+    } else if (target_scope === 'specific_student') {
+      await sendNotification({ studentId: target_student_id, title, content, type: 'notice', data: { notice_id: notice.id } });
+    } else if (target_scope === 'specific_teacher') {
+      await sendNotification({ userId: target_teacher_id, title, content, type: 'notice', data: { notice_id: notice.id } });
+    }
 
     await audit('teacher_notices', notice.id, {
       field: 'created',
@@ -1123,9 +1206,14 @@ exports.remarks = async (req, res, next) => {
       JOIN sections sec ON sec.id = e.section_id
       JOIN users t ON t.id = sr.teacher_id
       WHERE sr.is_deleted = false
+        AND s.school_id = :schoolId
       ORDER BY sr.created_at DESC
       LIMIT 300;
-    `);
+    `, {
+      replacements: {
+        schoolId: req.user.school_id,
+      },
+    });
 
     res.ok({ remarks: rows }, `${rows.length} remark(s) found.`);
   } catch (err) { next(err); }

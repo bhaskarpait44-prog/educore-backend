@@ -3,7 +3,7 @@
 /**
  * Seed: students
  *
- * Creates 40 students per section across all 48 sections = 1,920 students.
+ * Creates 10 students per section across all 48 sections = 480 students.
  * Each student gets:
  *   - A students row
  *   - A student_profiles row (SCD-2 current version)
@@ -85,7 +85,7 @@ module.exports = {
     for (const sec of sections) {
       const grade = sec.order_number; // 1–12
 
-      for (let s = 0; s < 40; s++) {
+      for (let s = 0; s < 10; s++) {
         const gender     = s % 2 === 0 ? 'male' : 'female';
         const firstName  = gender === 'male'
           ? pick(FIRST_NAMES_MALE,   globalStudentIdx)
@@ -130,7 +130,7 @@ module.exports = {
     for (const sec of sections) {
       const grade = sec.order_number;
 
-      for (let s = 0; s < 40; s++) {
+      for (let s = 0; s < 10; s++) {
         const admissionNo = `ADM-${schoolId}-${String(globalIdx2 + 1).padStart(5, '0')}`;
         const studentId   = admissionToId[admissionNo];
         const city        = pick(CITIES, globalIdx2);

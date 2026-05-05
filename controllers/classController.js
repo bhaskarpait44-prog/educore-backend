@@ -155,6 +155,7 @@ exports.list = async (req, res, next) => {
         ${columnNames.includes('is_active') ? 'c.is_active' : 'true as is_active'},
         c.created_at, c.updated_at,
         COUNT(DISTINCT s.id)  FILTER (WHERE ${sectionHasIsDeleted ? 's.is_deleted = false' : '1=1'}) AS section_count,
+        SUM(s.capacity)       FILTER (WHERE ${sectionHasIsDeleted ? 's.is_deleted = false' : '1=1'}) AS total_capacity,
         COUNT(DISTINCT sub.id) FILTER (WHERE ${subjectHasIsDeleted ? 'sub.is_deleted = false' : '1=1'}) AS subject_count,
         COUNT(DISTINCT e.id)   FILTER (WHERE e.status = 'active') AS student_count
       FROM classes c
@@ -246,6 +247,24 @@ exports.create = async (req, res, next) => {
 };
 
 // ──────────────────────────────────────────────────────────────────────────
+// GET /api/classes/teachers
+// Returns all users with role='teacher' for selection
+// ──────────────────────────────────────────────────────────────────────────
+exports.getTeachers = async (req, res, next) => {
+  try {
+    const schoolId = req.user.school_id;
+    const [teachers] = await sequelize.query(`
+      SELECT id, name, email, employee_id, designation, profile_photo
+      FROM users
+      WHERE school_id = :schoolId AND role = 'teacher' AND is_active = true AND is_deleted = false
+      ORDER BY name ASC;
+    `, { replacements: { schoolId } });
+
+    return res.ok(teachers);
+  } catch (err) { next(err); }
+};
+
+// ──────────────────────────────────────────────────────────────────────────
 // GET /api/classes/:id
 // ──────────────────────────────────────────────────────────────────────────
 exports.getById = async (req, res, next) => {
@@ -261,7 +280,14 @@ exports.getById = async (req, res, next) => {
           as       : 'sections',
           where    : { is_deleted: false },
           required : false,
-          attributes: ['id', 'name', 'capacity', 'is_active'],
+          attributes: ['id', 'name', 'capacity', 'is_active', 'class_teacher_id'],
+          include: [
+            {
+              model: sequelize.models.User,
+              as: 'classTeacher',
+              attributes: ['id', 'name', 'profile_photo'],
+            }
+          ]
         },
         {
           model    : Subject,
@@ -453,12 +479,14 @@ exports.getSections = async (req, res, next) => {
 
     const [sections] = await sequelize.query(`
       SELECT
-        s.id, s.name, s.capacity, s.is_active,
+        s.id, s.name, s.capacity, s.is_active, s.class_teacher_id,
+        u.name AS class_teacher_name,
         COUNT(e.id) FILTER (WHERE e.status = 'active') AS enrolled_count
       FROM sections s
       LEFT JOIN enrollments e ON e.section_id = s.id
+      LEFT JOIN users u ON u.id = s.class_teacher_id
       WHERE s.class_id = :classId AND s.is_deleted = false
-      GROUP BY s.id
+      GROUP BY s.id, u.name
       ORDER BY s.name ASC;
     `, { replacements: { classId: id } });
 
@@ -703,7 +731,7 @@ exports.studentsPdf = async (req, res, next) => {
 exports.createSection = async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, capacity } = req.body;
+    const { name, capacity, class_teacher_id } = req.body;
 
     const cls = await Class.findByPk(id);
     if (!cls) return res.fail('Class not found.', [], 404);
@@ -711,7 +739,12 @@ exports.createSection = async (req, res, next) => {
     const existing = await Section.findOne({ where: { class_id: id, name } });
     if (existing) return res.fail(`Section "${name}" already exists in this class.`, [], 409);
 
-    const section = await Section.create({ class_id: id, name, capacity });
+    const section = await Section.create({
+      class_id: id,
+      name,
+      capacity,
+      class_teacher_id: class_teacher_id || null
+    });
     return res.ok(section, 'Section added successfully.', 201);
   } catch (err) { next(err); }
 };
@@ -722,15 +755,16 @@ exports.createSection = async (req, res, next) => {
 exports.updateSection = async (req, res, next) => {
   try {
     const { id, sectionId } = req.params;
-    const { name, capacity, is_active } = req.body;
+    const { name, capacity, is_active, class_teacher_id } = req.body;
 
     const section = await Section.findOne({ where: { id: sectionId, class_id: id } });
     if (!section) return res.fail('Section not found.', [], 404);
 
-    await section.update({ name, capacity, is_active });
+    await section.update({ name, capacity, is_active, class_teacher_id: class_teacher_id || null });
     return res.ok(section, 'Section updated successfully.');
   } catch (err) { next(err); }
 };
+
 
 // ──────────────────────────────────────────────────────────────────────────
 // DELETE /api/classes/:id/sections/:sectionId

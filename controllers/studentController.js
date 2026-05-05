@@ -436,7 +436,9 @@ exports.resetPassword = async (req, res, next) => {
       UPDATE students
       SET password_hash = :hash,
           last_password_change = NOW(),
-          updated_at = NOW()
+          updated_at = NOW(),
+          failed_login_attempts = 0,
+          locked_until = NULL
       WHERE id = :id;
     `, { replacements: { hash, id } });
 
@@ -547,5 +549,67 @@ exports.getHistory = async (req, res, next) => {
       profile_history    : profileHistory,
       result_history     : results,
     }, 'Student history retrieved.');
+  } catch (err) { next(err); }
+};
+
+// ── Document Management ───────────────────────────────────────────────────
+
+exports.getDocuments = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const [docs] = await sequelize.query(`
+      SELECT d.*, u.name AS uploader_name
+      FROM student_documents d
+      LEFT JOIN users u ON u.id = d.uploaded_by
+      WHERE d.student_id = :id
+      ORDER BY d.created_at DESC;
+    `, { replacements: { id } });
+    res.ok(docs);
+  } catch (err) { next(err); }
+};
+
+exports.uploadDocument = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { name, document_type } = req.body;
+
+    if (!req.file) return res.fail('No file uploaded.');
+
+    const [[doc]] = await sequelize.query(`
+      INSERT INTO student_documents (
+        student_id, name, document_type, file_path, file_type, file_size, uploaded_by, created_at, updated_at
+      )
+      VALUES (
+        :student_id, :name, :document_type, :file_path, :file_type, :file_size, :uploaded_by, NOW(), NOW()
+      )
+      RETURNING *;
+    `, {
+      replacements: {
+        student_id: id,
+        name: name || req.file.originalname,
+        document_type: document_type || 'other',
+        file_path: req.file.path.replace(/\\/g, '/'), // Normalize Windows paths for URLs
+        file_type: req.file.mimetype,
+        file_size: req.file.size,
+        uploaded_by: req.user.id
+      }
+    });
+
+    res.ok(doc, 'Document uploaded successfully.', 201);
+  } catch (err) { next(err); }
+};
+
+exports.deleteDocument = async (req, res, next) => {
+  try {
+    const { id, docId } = req.params;
+    const [[doc]] = await sequelize.query(`
+      SELECT id FROM student_documents WHERE id = :docId AND student_id = :id;
+    `, { replacements: { docId, id } });
+
+    if (!doc) return res.fail('Document not found.', [], 404);
+
+    await sequelize.query(`DELETE FROM student_documents WHERE id = :docId;`, { replacements: { docId } });
+    // In a real app, also delete the file from storage
+    res.ok({}, 'Document deleted.');
   } catch (err) { next(err); }
 };

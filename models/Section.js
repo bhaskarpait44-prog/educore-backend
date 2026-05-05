@@ -7,6 +7,7 @@ const Section = sequelize.define('Section', {
   class_id   : { type: DataTypes.INTEGER, allowNull: false },
   name       : { type: DataTypes.STRING(10), allowNull: false },
   capacity   : { type: DataTypes.INTEGER, allowNull: false, defaultValue: 40 },
+  class_teacher_id : { type: DataTypes.INTEGER, allowNull: true },
   is_active  : { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: true },
   is_deleted : { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
 }, {

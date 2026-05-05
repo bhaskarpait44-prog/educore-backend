@@ -10,7 +10,9 @@ require('./models');
 
 const respond = require('./middlewares/respond');
 const errorHandler = require('./middlewares/errorHandler');
+const { apiLimiter } = require('./middlewares/rateLimiter');
 const { authenticate, requireRole } = require('./middlewares/auth');
+const enforcePasswordChange = require('./middlewares/enforcePasswordChange');
 const {
   requirePermission,
   attachUserPermissions,
@@ -40,6 +42,10 @@ const corsOrigins = (() => {
 
   return function originValidator(origin, callback) {
     if (!origin || allowed.includes(origin)) return callback(null, true);
+    
+    if (process.env.NODE_ENV === 'development') {
+      console.log(`[CORS] Blocked origin: ${origin}`);
+    }
     return callback(new Error(`CORS blocked for origin: ${origin}`));
   };
 })();
@@ -50,9 +56,18 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(respond);
 
+// Static folders
+app.use('/uploads', express.static('uploads'));
+
+app.use('/api', apiLimiter);
+
+app.get('/api/health', (req, res) =>
+  res.ok({ status: 'ok', timestamp: new Date() })
+);
+
 app.use('/api/auth', require('./routes/auth'));
 
-app.use('/api', authenticate, attachUserPermissions);
+app.use('/api', authenticate, attachUserPermissions, enforcePasswordChange);
 
 app.use('/api/students', require('./routes/students'));
 app.use('/api/sessions', require('./routes/sessions'));
@@ -81,6 +96,8 @@ app.use('/api/exams',
   require('./routes/exams')
 );
 
+app.use('/api/analytics', require('./routes/analytics'));
+
 app.use('/api/results',
   requirePermission('results.view'),
   require('./routes/results')
@@ -102,10 +119,6 @@ app.use('/api/student', require('./routes/student'));
 app.use('/api/audit',
   requirePermission('audit.view'),
   require('./routes/audit')
-);
-
-app.get('/health', (req, res) =>
-  res.ok({ status: 'ok', timestamp: new Date() })
 );
 
 app.use((req, res) =>

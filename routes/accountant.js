@@ -5,6 +5,7 @@ const { body } = require('express-validator');
 const validate = require('../middlewares/validate');
 const ctrl = require('../controllers/accountantController');
 const { requirePermission } = require('../middlewares/checkPermission');
+const accountantValidators = require('../validators/accountantValidators');
 
 router.get('/dashboard', requirePermission('fees.view'), ctrl.getDashboard);
 router.get('/dashboard/today-stats', requirePermission('fees.view'), ctrl.getTodayStats);
@@ -22,13 +23,7 @@ router.get('/students/:id/statement/pdf', requirePermission('fees.view'), ctrl.g
 
 router.post('/collect',
   requirePermission('fees.collect'),
-  [
-    body('student_id').isInt(),
-    body('invoice_ids').isArray({ min: 1 }),
-    body('amount').isDecimal({ gt: '0' }),
-    body('payment_mode').isIn(['cash', 'online', 'cheque', 'dd', 'upi']),
-    body('payment_date').isDate(),
-  ],
+  accountantValidators.collectFeesRules,
   validate,
   ctrl.collectFees
 );
@@ -37,7 +32,12 @@ router.get('/receipt/:id', requirePermission('fees.view'), ctrl.getReceipt);
 router.get('/receipt/:id/pdf', requirePermission('fees.view'), ctrl.getReceiptPdf);
 
 router.get('/fee-structure', requirePermission('fees.view'), ctrl.getFeeStructure);
-router.post('/fee-structure', requirePermission('fees.edit'), ctrl.createFeeStructure);
+router.post('/fee-structure', 
+  requirePermission('fees.edit'), 
+  accountantValidators.feeStructureRules, 
+  validate, 
+  ctrl.createFeeStructure
+);
 router.patch('/fee-structure/:id', requirePermission('fees.edit'), ctrl.updateFeeStructure);
 router.delete('/fee-structure/:id', requirePermission('fees.edit'), ctrl.deleteFeeStructure);
 router.post('/fee-structure/generate-invoices', requirePermission('fees.edit'), ctrl.generateFeeInvoices);
@@ -59,10 +59,20 @@ router.post('/defaulters/remind', requirePermission('fees.collect'), ctrl.sendDe
 router.post('/defaulters/remind-bulk', requirePermission('fees.collect'), ctrl.sendBulkDefaulterReminder);
 
 router.get('/notices', requirePermission('fees.view'), ctrl.getNotices);
-router.post('/notices', requirePermission('fees.collect'), ctrl.createNotice);
+router.post('/notices', 
+  requirePermission('fees.collect'), 
+  accountantValidators.createNoticeRules, 
+  validate, 
+  ctrl.createNotice
+);
 
 router.get('/concessions', requirePermission('fees.waive'), ctrl.getConcessions);
-router.post('/concessions/apply', requirePermission('fees.waive'), ctrl.applyConcession);
+router.post('/concessions/apply', 
+  requirePermission('fees.waive'), 
+  accountantValidators.applyConcessionRules, 
+  validate, 
+  ctrl.applyConcession
+);
 router.get('/concessions/report', requirePermission('fees.waive'), ctrl.getConcessionReport);
 
 router.get('/reports/daily', requirePermission('fees.report'), ctrl.getDailyReport);

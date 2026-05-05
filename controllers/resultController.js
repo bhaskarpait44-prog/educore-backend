@@ -2,15 +2,16 @@
 
 const sequelize    = require('../config/database');
 const examEngine   = require('../utils/examEngine');
+const { MarkHistory, GradingScale } = require('../models');
 
 async function getClassReviewSummary(sessionId, classId) {
   const [[row]] = await sequelize.query(`
     SELECT
       COUNT(es.id) AS total_subjects,
-      COUNT(es.id) FILTER (WHERE es.review_status = 'approved') AS approved_count,
-      COUNT(es.id) FILTER (WHERE es.review_status = 'submitted') AS submitted_count,
-      COUNT(es.id) FILTER (WHERE es.review_status = 'rejected') AS rejected_count,
-      COUNT(es.id) FILTER (WHERE es.review_status = 'draft') AS draft_count
+      SUM(CASE WHEN es.review_status = 'approved' THEN 1 ELSE 0 END) AS approved_count,
+      SUM(CASE WHEN es.review_status = 'submitted' THEN 1 ELSE 0 END) AS submitted_count,
+      SUM(CASE WHEN es.review_status = 'rejected' THEN 1 ELSE 0 END) AS rejected_count,
+      SUM(CASE WHEN es.review_status = 'draft' THEN 1 ELSE 0 END) AS draft_count
     FROM exams ex
     JOIN exam_subjects es ON es.exam_id = ex.id
     WHERE ex.session_id = :sessionId
@@ -106,7 +107,10 @@ exports.enterMarks = async (req, res, next) => {
     const { exam_id, enrollment_id, results } = req.body;
 
     const [[exam]] = await sequelize.query(
-      `SELECT id, status, class_id, session_id FROM exams WHERE id = :exam_id;`,
+      `SELECT e.id, e.status, e.class_id, e.session_id, s.school_id 
+       FROM exams e 
+       JOIN sessions s ON s.id = e.session_id
+       WHERE e.id = :exam_id;`,
       { replacements: { exam_id } }
     );
 
@@ -130,137 +134,144 @@ exports.enterMarks = async (req, res, next) => {
       return res.fail('This enrollment does not belong to the selected exam class/session.', [], 422);
     }
 
-    const saved = [];
-    let examStatus = exam.status;
-    await sequelize.transaction(async (t) => {
-      for (const r of results) {
-        const [[subject]] = await sequelize.query(
-          `SELECT es.subject_id AS id, s.class_id, es.subject_type, es.combined_total_marks, es.combined_passing_marks,
-                  es.theory_total_marks, es.theory_passing_marks, es.practical_total_marks, es.practical_passing_marks
-           FROM exam_subjects es
-           JOIN subjects s ON s.id = es.subject_id
-           WHERE es.exam_id = :examId
-             AND es.subject_id = :sid
-           LIMIT 1;`,
-          { replacements: { examId: exam_id, sid: r.subject_id }, transaction: t }
-        );
-        if (!subject) {
-          throw Object.assign(
-            new Error(`Subject ${r.subject_id} is not configured for this exam.`),
-            { status: 422 }
-          );
-        }
-
-        if (Number(subject.class_id) !== Number(exam.class_id)) {
-          throw Object.assign(
-            new Error(`Subject ${r.subject_id} does not belong to this exam class.`),
-            { status: 422 }
-          );
-        }
-
-        const isAbsent = r.is_absent === true;
-        const rawMarks = r.marks_obtained;
-        const marks = isAbsent || rawMarks === null || rawMarks === undefined || rawMarks === ''
-          ? null
-          : parseFloat(rawMarks);
-
-        if (!isAbsent && marks != null && marks > parseFloat(subject.combined_total_marks)) {
-          throw Object.assign(
-            new Error(`Marks for subject ${r.subject_id} exceed total marks (${subject.combined_total_marks}).`),
-            { status: 422 }
-          );
-        }
-
-        const { grade, isPass } = examEngine.calcSubjectResult(
-          marks,
-          parseFloat(subject.combined_total_marks),
-          parseFloat(subject.combined_passing_marks),
-          isAbsent
-        );
-
-        await sequelize.query(`
-          INSERT INTO exam_results
-            (exam_id, enrollment_id, subject_id, marks_obtained, is_absent, grade, is_pass, entered_by, created_at, updated_at)
-          VALUES (:exam_id, :enrollment_id, :subject_id, :marks, :isAbsent, :grade, :isPass, :enteredBy, NOW(), NOW())
-          ON CONFLICT (exam_id, enrollment_id, subject_id) DO UPDATE
-            SET marks_obtained = :marks, is_absent = :isAbsent, grade = :grade,
-                is_pass = :isPass, entered_by = :enteredBy, updated_at = NOW();
-        `, { replacements: { exam_id, enrollment_id, subject_id: r.subject_id, marks, isAbsent, grade, isPass, enteredBy: req.user.id }, transaction: t });
-
-        saved.push({ subject_id: r.subject_id, grade, is_pass: isPass });
-      }
-
-      examStatus = await syncExamStatus(exam_id, t);
+    const gradingScale = await examEngine.getActiveGradingScale(exam.school_id);
+    const saved = await examEngine.saveStudentMarks({
+      exam,
+      enrollment_id,
+      results,
+      userId: req.user.id,
+      gradingScale
     });
+
+    const examStatus = await syncExamStatus(exam_id);
 
     res.ok({ exam_id, enrollment_id, results: saved, exam_status: examStatus }, `${saved.length} subject result(s) saved.`);
   } catch (err) { next(err); }
 };
 
+const { generateReportCard } = require('../utils/pdfGenerator');
+
 exports.getResults = async (req, res, next) => {
   try {
     const { enrollment_id } = req.params;
 
+    // 1. Fetch Subject Wise Results
     const [subjectResults] = await sequelize.query(`
-      SELECT er.id, sub.name AS subject, sub.code, sub.is_core,
-             er.marks_obtained, es.combined_total_marks AS total_marks, er.is_absent, er.grade, er.is_pass,
-             e.name AS exam_name, e.exam_type
+      SELECT 
+        sub.id AS subject_id,
+        sub.name AS subject_name,
+        sub.code AS subject_code,
+        er.marks_obtained,
+        er.theory_marks_obtained,
+        er.practical_marks_obtained,
+        er.is_absent,
+        er.grade,
+        er.is_pass,
+        es.theory_total_marks,
+        es.practical_total_marks,
+        es.combined_total_marks,
+        e.name AS exam_name,
+        e.exam_type,
+        e.start_date
       FROM exam_results er
       JOIN exam_subjects es ON es.exam_id = er.exam_id AND es.subject_id = er.subject_id
       JOIN subjects sub ON sub.id = er.subject_id
-      JOIN exams    e   ON e.id   = er.exam_id
+      JOIN exams e ON e.id = er.exam_id
       WHERE er.enrollment_id = :enrollment_id
-      ORDER BY e.start_date, sub.order_number;
+      ORDER BY e.start_date DESC, sub.order_number;
     `, { replacements: { enrollment_id } });
 
-    const examSummaries = Object.values(subjectResults.reduce((acc, row) => {
-      const key = `${row.exam_name}::${row.exam_type}`;
-      if (!acc[key]) {
-        acc[key] = {
-          exam_name: row.exam_name,
-          exam_type: row.exam_type,
-          total_marks: 0,
-          marks_obtained: 0,
-          failed_subjects: 0,
-        };
-      }
-
-      acc[key].total_marks += Number(row.total_marks || 0);
-      acc[key].marks_obtained += row.is_absent ? 0 : Number(row.marks_obtained || 0);
-      if (row.is_pass === false) acc[key].failed_subjects += 1;
-
-      return acc;
-    }, {})).map((exam) => {
-      const percentage = exam.total_marks > 0
-        ? Number(((exam.marks_obtained / exam.total_marks) * 100).toFixed(2))
-        : null;
-
-      let result = 'pass';
-      if (exam.failed_subjects > 2) result = 'fail';
-      else if (exam.failed_subjects > 0) result = 'compartment';
-
-      return {
-        exam_name: exam.exam_name,
-        exam_type: exam.exam_type,
-        total_marks: exam.total_marks,
-        marks_obtained: exam.marks_obtained,
-        percentage,
-        grade: percentage == null ? null : examEngine.percentageToGrade(percentage),
-        result,
-      };
-    });
-
+    // 2. Fetch Final Result Summary
     const [[finalResult]] = await sequelize.query(`
-      SELECT sr.percentage, sr.grade, sr.result, sr.is_promoted,
-             sr.compartment_subjects, sr.promotion_override_reason
-      FROM student_results sr WHERE sr.enrollment_id = :enrollment_id;
+      SELECT 
+        sr.*,
+        sess.name AS session_name
+      FROM student_results sr
+      JOIN sessions sess ON sess.id = sr.session_id
+      WHERE sr.enrollment_id = :enrollment_id
+      LIMIT 1;
     `, { replacements: { enrollment_id } });
 
     res.ok({
       subject_results: subjectResults,
-      exam_summaries: examSummaries,
-      final_result: finalResult || null,
-    }, 'Results retrieved.');
+      final_result: finalResult || null
+    });
+  } catch (err) { next(err); }
+};
+
+exports.getReportCard = async (req, res, next) => {
+  try {
+    const { enrollment_id } = req.params;
+
+    // 1. Fetch Enrollment, Student, School, Session
+    const [[data]] = await sequelize.query(`
+      SELECT 
+        e.id AS enrollment_id, e.roll_number, e.joined_date,
+        s.id AS student_id, s.first_name, s.last_name, s.admission_no, s.father_name,
+        c.name AS class_name,
+        sec.name AS section_name,
+        sess.id AS session_id, sess.name AS session_name,
+        sch.id AS school_id, sch.name AS school_name, sch.address AS school_address, sch.phone AS school_phone
+      FROM enrollments e
+      JOIN students s ON s.id = e.student_id
+      JOIN classes c ON c.id = e.class_id
+      LEFT JOIN sections sec ON sec.id = e.section_id
+      JOIN sessions sess ON sess.id = e.session_id
+      JOIN schools sch ON sch.id = sess.school_id
+      WHERE e.id = :enrollment_id
+      LIMIT 1;
+    `, { replacements: { enrollment_id } });
+
+    if (!data) return res.fail('Enrollment not found.', [], 404);
+
+    // 2. Fetch Subject Results
+    const [subjectResults] = await sequelize.query(`
+      SELECT 
+        sub.name AS subject, sub.code,
+        er.marks_obtained, er.theory_marks_obtained, er.practical_marks_obtained, er.is_absent, er.grade, er.is_pass,
+        es.theory_total_marks AS theory_total, es.practical_total_marks AS practical_total, es.combined_total_marks AS total_marks
+      FROM exam_results er
+      JOIN exam_subjects es ON es.exam_id = er.exam_id AND es.subject_id = er.subject_id
+      JOIN subjects sub ON sub.id = er.subject_id
+      JOIN exams e ON e.id = er.exam_id
+      WHERE er.enrollment_id = :enrollment_id
+        AND e.exam_type != 'compartment'
+      ORDER BY sub.order_number;
+    `, { replacements: { enrollment_id } });
+
+    // 3. Fetch Final Result
+    const [[finalResult]] = await sequelize.query(`
+      SELECT total_marks, marks_obtained, percentage, grade, result, grace_marks_info
+      FROM student_results
+      WHERE enrollment_id = :enrollment_id
+      LIMIT 1;
+    `, { replacements: { enrollment_id } });
+
+    if (!finalResult) {
+      return res.fail('Result not yet calculated for this student.', [], 400);
+    }
+
+    // 4. Fetch Attendance
+    const { getAttendancePercent } = require('../utils/attendanceCalculator');
+    const attendance = await getAttendancePercent(enrollment_id);
+
+    // 5. Generate PDF
+    const pdfBuffer = await generateReportCard({
+      school: { name: data.school_name, address: data.school_address, phone: data.school_phone },
+      student: { first_name: data.first_name, last_name: data.last_name, admission_no: data.admission_no, father_name: data.father_name },
+      enrollment: { roll_number: data.roll_number, class_name: data.class_name, section_name: data.section_name },
+      session: { name: data.session_name },
+      results: subjectResults,
+      attendance,
+      finalResult
+    });
+
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename=ReportCard_${data.admission_no}.pdf`,
+      'Content-Length': pdfBuffer.length,
+    });
+    res.send(pdfBuffer);
   } catch (err) { next(err); }
 };
 
@@ -277,13 +288,13 @@ exports.getClassResults = async (req, res, next) => {
       SELECT
         e.id AS enrollment_id,
         s.admission_no,
-        s.first_name || ' ' || s.last_name AS student_name,
+        CONCAT(s.first_name, ' ', s.last_name) AS student_name,
         e.roll_number,
         c.name AS class_name,
         sec.name AS section_name,
-        sr.marks_obtained,
-        sr.total_marks,
-        sr.percentage,
+        COALESCE(sr.marks_obtained, 0) AS marks_obtained,
+        COALESCE(sr.total_marks, 0) AS total_marks,
+        COALESCE(sr.percentage, 0) AS percentage,
         sr.grade,
         sr.result,
         sr.is_promoted,
@@ -295,8 +306,13 @@ exports.getClassResults = async (req, res, next) => {
       LEFT JOIN sections sec ON sec.id = e.section_id
       LEFT JOIN student_results sr ON sr.enrollment_id = e.id AND sr.session_id = :session_id
       WHERE e.session_id = :session_id AND e.class_id = :class_id
-      ORDER BY e.roll_number NULLS LAST, s.first_name
-    `, { replacements: { session_id, class_id } });
+      ORDER BY (CASE WHEN e.roll_number IS NULL THEN 1 ELSE 0 END), e.roll_number, s.first_name
+    `, { 
+      replacements: { 
+        session_id: Number(session_id), 
+        class_id: Number(class_id) 
+      } 
+    });
 
     const reviewSummary = await getClassReviewSummary(session_id, class_id);
 
@@ -441,11 +457,22 @@ exports.overrideMark = async (req, res, next) => {
       }
     }
 
+    const gradingScale = await examEngine.getActiveGradingScale(exam.school_id);
     const { grade, isPass } = examEngine.calcSubjectResult(
       finalMarks,
       Number(subject.combined_total_marks || 0),
       Number(subject.combined_passing_marks || 0),
-      !!is_absent
+      !!is_absent,
+      gradingScale
+    );
+
+    // Fetch old result for history
+    const [[oldResult]] = await sequelize.query(
+      `SELECT marks_obtained, theory_marks_obtained, practical_marks_obtained, is_absent 
+       FROM exam_results 
+       WHERE exam_id = :exam_id AND enrollment_id = :enrollment_id AND subject_id = :subject_id 
+       LIMIT 1;`,
+      { replacements: { exam_id, enrollment_id, subject_id }, transaction: null }
     );
 
     const [updatedRows] = await sequelize.query(`
@@ -483,6 +510,24 @@ exports.overrideMark = async (req, res, next) => {
     if (updatedRows.length === 0) {
       return res.fail('Teacher marks have not been entered for this student yet.', [], 404);
     }
+
+    // Log to MarkHistory
+    await MarkHistory.create({
+      exam_id,
+      enrollment_id,
+      subject_id,
+      old_marks_obtained: oldResult?.marks_obtained,
+      new_marks_obtained: finalMarks,
+      old_theory_marks: oldResult?.theory_marks_obtained,
+      new_theory_marks: theoryMarks,
+      old_practical_marks: oldResult?.practical_marks_obtained,
+      new_practical_marks: practicalMarks,
+      old_is_absent: oldResult?.is_absent,
+      new_is_absent: !!is_absent,
+      changed_by: req.user.id,
+      change_reason: reason,
+      change_type: 'override',
+    });
 
     const [[resultRow]] = await sequelize.query(`
       SELECT id

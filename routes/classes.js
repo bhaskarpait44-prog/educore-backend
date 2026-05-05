@@ -15,6 +15,7 @@ router.use(authenticate);
 
 // ── Class CRUD ────────────────────────────────────────────────────────────
 router.get   ('/',           ctrl.list);
+router.get   ('/teachers',   requireAdmin, ctrl.getTeachers);
 router.post  ('/',           requireAdmin, createClassRules, validate, ctrl.create);
 router.get   ('/:id',        ctrl.getById);
 router.get   ('/:id/students/pdf', ctrl.studentsPdf);

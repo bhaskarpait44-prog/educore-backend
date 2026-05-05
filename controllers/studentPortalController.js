@@ -179,16 +179,16 @@ async function getStudentContext(req, { requireEnrollment = true } = {}) {
 async function getAttendanceSummary(enrollmentId) {
   const [[summary]] = await sequelize.query(`
     SELECT
-      COUNT(*) FILTER (WHERE status <> 'holiday') AS working_days,
-      COUNT(*) FILTER (WHERE status = 'present') AS present_days,
-      COUNT(*) FILTER (WHERE status = 'absent') AS absent_days,
-      COUNT(*) FILTER (WHERE status = 'late') AS late_days,
-      COUNT(*) FILTER (WHERE status = 'half_day') AS half_days,
+      SUM(CASE WHEN status <> 'holiday' THEN 1 ELSE 0 END) AS working_days,
+      SUM(CASE WHEN status = 'present' THEN 1 ELSE 0 END) AS present_days,
+      SUM(CASE WHEN status = 'absent' THEN 1 ELSE 0 END) AS absent_days,
+      SUM(CASE WHEN status = 'late' THEN 1 ELSE 0 END) AS late_days,
+      SUM(CASE WHEN status = 'half_day' THEN 1 ELSE 0 END) AS half_days,
       ROUND(
         (
-          COUNT(*) FILTER (WHERE status IN ('present', 'late'))
-          + COUNT(*) FILTER (WHERE status = 'half_day') * 0.5
-        ) / NULLIF(COUNT(*) FILTER (WHERE status <> 'holiday'), 0) * 100,
+          SUM(CASE WHEN status IN ('present', 'late') THEN 1 ELSE 0 END)
+          + SUM(CASE WHEN status = 'half_day' THEN 1 ELSE 0 END) * 0.5
+        ) / NULLIF(SUM(CASE WHEN status <> 'holiday' THEN 1 ELSE 0 END), 0) * 100,
         2
       ) AS percentage
     FROM attendance
@@ -1501,6 +1501,7 @@ exports.noticeList = async (req, res, next) => {
         n.expiry_date,
         n.target_scope,
         poster.name AS posted_by,
+        poster.role AS posted_by_role,
         COALESCE(snr.read_at IS NOT NULL, false) AS is_read,
         COALESCE(np.pinned_at IS NOT NULL, false) AS is_pinned
       FROM teacher_notices n
@@ -1516,11 +1517,17 @@ exports.noticeList = async (req, res, next) => {
         AND (:category::text IS NULL OR n.category = :category)
         AND (
           n.target_scope = 'all_students'
+          OR n.target_scope = 'whole_school'
           OR (n.target_scope = 'specific_student' AND n.target_student_id = :studentId)
-          OR (n.target_scope = 'my_class_only' AND n.class_id = :classId AND n.section_id = :sectionId)
+          OR (n.target_scope IN ('my_class_only', 'whole_class') AND n.class_id = :classId AND n.section_id = :sectionId)
           OR (n.target_scope = 'specific_section' AND n.class_id = :classId AND (n.section_id IS NULL OR n.section_id = :sectionId))
-        )
-      ORDER BY
+          OR (n.target_scope = 'specific_subject' AND EXISTS (
+            SELECT 1 FROM student_subjects ss
+            WHERE ss.student_id = :studentId
+              AND ss.subject_id = n.subject_id
+              AND ss.is_active = true
+          ))
+        )      ORDER BY
         COALESCE(np.pinned_at IS NOT NULL, false) DESC,
         COALESCE(snr.read_at IS NOT NULL, false) ASC,
         n.publish_date DESC;

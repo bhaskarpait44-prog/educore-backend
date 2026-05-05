@@ -1,6 +1,8 @@
 'use strict';
 
+const XLSX = require('xlsx');
 const sequelize = require('../config/database');
+const examEngine = require('../utils/examEngine');
 const computeSubjectMarks = require('../utils/computeSubjectMarks');
 
 const toNumberOrNull = (value) => {
@@ -91,8 +93,8 @@ exports.list = async (req, res, next) => {
         c.name as class_name,
         s.name as session_name,
         COUNT(es.id) AS subject_count,
-        COUNT(es.id) FILTER (WHERE es.review_status = 'submitted') AS pending_review_count,
-        COUNT(es.id) FILTER (WHERE es.review_status = 'approved') AS approved_subject_count
+        SUM(CASE WHEN es.review_status = 'submitted' THEN 1 ELSE 0 END) AS pending_review_count,
+        SUM(CASE WHEN es.review_status = 'approved' THEN 1 ELSE 0 END) AS approved_subject_count
       FROM exams e
       JOIN classes c ON c.id = e.class_id
       JOIN sessions s ON s.id = e.session_id
@@ -110,7 +112,12 @@ exports.list = async (req, res, next) => {
 
     sql += ' GROUP BY e.id, c.name, s.name ORDER BY e.start_date DESC, e.id DESC';
 
-    const [exams] = await sequelize.query(sql, { replacements });
+    const [exams] = await sequelize.query(sql, { 
+      replacements: { 
+        ...replacements, 
+        sessionId: session_id ? Number(session_id) : undefined 
+      } 
+    });
     res.ok({ exams });
   } catch (err) { next(err); }
 };
@@ -126,7 +133,7 @@ exports.getSubjects = async (req, res, next) => {
       JOIN classes c ON c.id = e.class_id
       WHERE e.id = :examId
       LIMIT 1;
-    `, { replacements: { examId } });
+    `, { replacements: { examId: Number(examId) } });
 
     if (!exam) return res.fail('Exam not found', [], 404);
 
@@ -155,12 +162,12 @@ exports.getSubjects = async (req, res, next) => {
         reviewer.name AS reviewed_by_name,
         es.reviewed_at,
         es.review_note,
-        COUNT(e.id) FILTER (WHERE e.status = 'active') AS total_students,
+        SUM(CASE WHEN e.status = 'active' THEN 1 ELSE 0 END) AS total_students,
         COUNT(er.id) AS entered_students,
-        COUNT(er.id) FILTER (WHERE er.is_absent = true) AS absent_students,
-        ROUND(AVG(CASE WHEN er.is_absent = false THEN er.marks_obtained END), 2) AS average_marks,
-        MAX(CASE WHEN er.is_absent = false THEN er.marks_obtained END) AS highest_marks,
-        MIN(CASE WHEN er.is_absent = false THEN er.marks_obtained END) AS lowest_marks
+        SUM(CASE WHEN er.is_absent = true THEN 1 ELSE 0 END) AS absent_students,
+        COALESCE(ROUND(AVG(CASE WHEN er.is_absent = false THEN er.marks_obtained END), 2), 0) AS average_marks,
+        COALESCE(MAX(CASE WHEN er.is_absent = false THEN er.marks_obtained END), 0) AS highest_marks,
+        COALESCE(MIN(CASE WHEN er.is_absent = false THEN er.marks_obtained END), 0) AS lowest_marks
       FROM exam_subjects es
       JOIN subjects s ON s.id = es.subject_id
       LEFT JOIN users teacher ON teacher.id = es.assigned_teacher_id
@@ -188,9 +195,9 @@ exports.getSubjects = async (req, res, next) => {
       ORDER BY s.order_number, s.name;
     `, {
       replacements: {
-        examId,
-        sessionId: exam.session_id,
-        classId: exam.class_id,
+        examId: Number(examId),
+        sessionId: Number(exam.session_id),
+        classId: Number(exam.class_id),
       },
     });
 
@@ -230,15 +237,14 @@ exports.getSubjects = async (req, res, next) => {
       WHERE es.exam_id = :examId
       ORDER BY
         es.subject_id,
-        COALESCE(NULLIF(REGEXP_REPLACE(e.roll_number, '\\D', '', 'g'), ''), '999999')::integer,
         e.roll_number,
         stu.first_name,
         stu.last_name;
     `, {
       replacements: {
-        examId,
-        sessionId: exam.session_id,
-        classId: exam.class_id,
+        examId: Number(examId),
+        sessionId: Number(exam.session_id),
+        classId: Number(exam.class_id),
       },
     });
 
@@ -562,6 +568,145 @@ exports.approveAllSubjects = async (req, res, next) => {
       approved_count: updatedRows.length,
       subject_ids: updatedRows.map((row) => Number(row.subject_id)),
     }, updatedRows.length > 0 ? 'All submitted subjects approved.' : 'No submitted subjects were pending approval.');
+  } catch (err) { next(err); }
+};
+
+exports.getTemplate = async (req, res, next) => {
+  try {
+    const { id, subjectId } = req.params;
+
+    const [[exam]] = await sequelize.query(`
+      SELECT e.id, e.class_id, e.session_id, e.name AS exam_name, c.name AS class_name
+      FROM exams e
+      JOIN classes c ON c.id = e.class_id
+      WHERE e.id = :id
+      LIMIT 1;
+    `, { replacements: { id } });
+
+    if (!exam) return res.fail('Exam not found.', [], 404);
+
+    const [[subject]] = await sequelize.query(`
+      SELECT s.id, s.name, es.subject_type, es.theory_total_marks, es.practical_total_marks, es.combined_total_marks
+      FROM exam_subjects es
+      JOIN subjects s ON s.id = es.subject_id
+      WHERE es.exam_id = :examId AND es.subject_id = :subjectId
+      LIMIT 1;
+    `, { replacements: { examId: id, subjectId } });
+
+    if (!subject) return res.fail('Subject not configured for this exam.', [], 404);
+
+    const [students] = await sequelize.query(`
+      SELECT e.id AS enrollment_id, e.roll_number, s.admission_no, s.first_name, s.last_name
+      FROM enrollments e
+      JOIN students s ON s.id = e.student_id
+      WHERE e.session_id = :sessionId AND e.class_id = :classId AND e.status = 'active'
+      ORDER BY e.roll_number, s.first_name;
+    `, { replacements: { sessionId: exam.session_id, classId: exam.class_id } });
+
+    const data = students.map(s => {
+      const row = {
+        'Enrollment ID': s.enrollment_id,
+        'Admission No': s.admission_no,
+        'Roll No': s.roll_number || '',
+        'Student Name': `${s.first_name} ${s.last_name}`,
+      };
+
+      if (subject.subject_type === 'both') {
+        row[`Theory Marks (Max ${subject.theory_total_marks})`] = '';
+        row[`Practical Marks (Max ${subject.practical_total_marks})`] = '';
+      } else {
+        row[`Marks (Max ${subject.combined_total_marks})`] = '';
+      }
+      row['Is Absent (Yes/No)'] = 'No';
+      return row;
+    });
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(data);
+    XLSX.utils.book_append_sheet(wb, ws, 'Marks Entry');
+
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    res.set({
+      'Content-Type': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'Content-Disposition': `attachment; filename=MarksTemplate_${exam.exam_name}_${subject.name}.xlsx`,
+      'Content-Length': buffer.length,
+    });
+    res.send(buffer);
+  } catch (err) { next(err); }
+};
+
+exports.uploadMarks = async (req, res, next) => {
+  try {
+    const { id, subjectId } = req.params;
+    if (!req.file) return res.fail('No file uploaded.');
+
+    const [[exam]] = await sequelize.query(
+      `SELECT e.id, e.status, e.class_id, e.session_id, s.school_id 
+       FROM exams e 
+       JOIN sessions s ON s.id = e.session_id
+       WHERE e.id = :id;`,
+      { replacements: { id } }
+    );
+    if (!exam) return res.fail('Exam not found.', [], 404);
+    if (exam.status === 'completed') return res.fail('Exam is already completed.');
+
+    const [[subject]] = await sequelize.query(`
+      SELECT es.subject_id, es.subject_type, es.assigned_teacher_id
+      FROM exam_subjects es
+      WHERE es.exam_id = :examId AND es.subject_id = :subjectId
+      LIMIT 1;
+    `, { replacements: { examId: id, subjectId } });
+
+    if (!subject) return res.fail('Subject not configured for this exam.', [], 404);
+
+    // Security Check: Is this teacher assigned?
+    if (req.user.role === 'teacher' && Number(subject.assigned_teacher_id) !== req.user.id) {
+      return res.fail('You are not assigned to enter marks for this subject.', [], 403);
+    }
+
+    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+    const sheetName = workbook.SheetNames[0];
+    const sheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json(sheet);
+
+    const gradingScale = await examEngine.getActiveGradingScale(exam.school_id);
+    let processedCount = 0;
+
+    await sequelize.transaction(async (t) => {
+      for (const row of rows) {
+        const enrollment_id = row['Enrollment ID'];
+        if (!enrollment_id) continue;
+
+        const isAbsent = String(row['Is Absent (Yes/No)'] || '').toLowerCase() === 'yes';
+        const entry = {
+          subject_id: Number(subjectId),
+          is_absent: isAbsent,
+        };
+
+        if (!isAbsent) {
+          if (subject.subject_type === 'both') {
+            entry.theory_marks_obtained = row[Object.keys(row).find(k => k.startsWith('Theory Marks'))];
+            entry.practical_marks_obtained = row[Object.keys(row).find(k => k.startsWith('Practical Marks'))];
+          } else {
+            entry.marks_obtained = row[Object.keys(row).find(k => k.startsWith('Marks'))];
+          }
+        }
+
+        await examEngine.saveStudentMarks({
+          exam,
+          enrollment_id,
+          results: [entry],
+          userId: req.user.id,
+          gradingScale,
+          change_type: 'entry'
+        }, t);
+
+        processedCount++;
+      }
+    });
+
+    res.ok({ processed: processedCount }, `Successfully uploaded marks for ${processedCount} students.`);
   } catch (err) { next(err); }
 };
 
